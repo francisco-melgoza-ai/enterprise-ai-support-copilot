@@ -23,6 +23,10 @@ dev = [
     "ruff",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app", "app.*"]
+exclude = ["evaluation*", "sample_data*", "tests*", "scripts*", "docs*"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py313"
