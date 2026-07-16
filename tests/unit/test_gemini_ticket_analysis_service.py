@@ -62,6 +62,8 @@ async def test_gemini_service_returns_valid_structured_response(
     assert telemetry.outcome == "success"
     assert telemetry.attempt_count == 1
     assert telemetry.duration_ms >= 0
+    assert not hasattr(telemetry, "ticket_id")
+    assert "TICKET-1" not in caplog.text
 
 
 @pytest.mark.anyio
@@ -77,6 +79,7 @@ async def test_gemini_service_rejects_invalid_model_response(
     telemetry = _telemetry_record(caplog)
     assert telemetry.outcome == "invalid_response"
     assert telemetry.attempt_count == 1
+    assert not hasattr(telemetry, "ticket_id")
 
 
 @pytest.mark.anyio
@@ -92,6 +95,7 @@ async def test_gemini_service_times_out(caplog: pytest.LogCaptureFixture) -> Non
     telemetry = _telemetry_record(caplog)
     assert telemetry.outcome == "timeout"
     assert telemetry.attempt_count == 2
+    assert not hasattr(telemetry, "ticket_id")
 
 
 @pytest.mark.anyio
@@ -109,6 +113,7 @@ async def test_gemini_service_raises_after_exhausted_retries(
     telemetry = _telemetry_record(caplog)
     assert telemetry.outcome == "error"
     assert telemetry.attempt_count == 2
+    assert not hasattr(telemetry, "ticket_id")
 
 
 @pytest.mark.anyio
@@ -145,6 +150,7 @@ async def test_gemini_service_does_not_log_ticket_content(
 
     assert "TOP SECRET SUBJECT" not in caplog.text
     assert "TOP SECRET DESCRIPTION" not in caplog.text
+    assert "TICKET-SECRET" not in caplog.text
     assert "Safe response." not in caplog.text
 
 

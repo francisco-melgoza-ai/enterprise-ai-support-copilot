@@ -86,6 +86,8 @@ def test_request_id_is_included_in_application_logs(
     ]
     assert app_records
     assert all(record.request_id == "log-request-id" for record in app_records)
+    assert all(not hasattr(record, "ticket_id") for record in app_records)
+    assert "TICKET-LOGS" not in caplog.text
     assert "Sensitive subject should not appear" not in caplog.text
     assert "Sensitive description should not appear" not in caplog.text
 

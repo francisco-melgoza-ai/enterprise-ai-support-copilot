@@ -224,7 +224,6 @@ class GeminiTicketAnalysisService:
                     "outcome": outcome,
                     "attempt_count": attempt_count,
                     "duration_ms": duration_ms,
-                    "ticket_id": ticket.ticket_id,
                 },
             )
 
@@ -260,14 +259,14 @@ class GeminiTicketAnalysisService:
                 timed_out = True
                 logger.warning(
                     "gemini_ticket_analysis_timeout",
-                    extra={"ticket_id": ticket.ticket_id, "attempt": attempt},
+                    extra={"attempt": attempt},
                 )
             except Exception as exc:
                 last_error = exc
                 timed_out = False
                 logger.warning(
                     "gemini_ticket_analysis_attempt_failed",
-                    extra={"ticket_id": ticket.ticket_id, "attempt": attempt},
+                    extra={"attempt": attempt},
                 )
 
         raise TicketAnalysisProviderError(

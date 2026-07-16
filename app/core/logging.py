@@ -35,7 +35,6 @@ class JsonFormatter(logging.Formatter):
             "path",
             "status_code",
             "duration_ms",
-            "ticket_id",
             "provider",
             "model",
             "outcome",

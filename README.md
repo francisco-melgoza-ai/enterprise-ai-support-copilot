@@ -173,7 +173,6 @@ Safe Gemini telemetry example:
   "logger": "app.services.ticket_analysis",
   "message": "gemini_ticket_analysis_completed",
   "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
-  "ticket_id": "TICKET-123",
   "provider": "gemini",
   "model": "gemini-2.5-flash",
   "outcome": "success",
@@ -183,8 +182,9 @@ Safe Gemini telemetry example:
 ```
 
 Gemini telemetry outcomes are `success`, `timeout`, `invalid_response`, and
-`error`. Logs must not include ticket subjects, ticket descriptions, generated
-model content, credentials, or PII.
+`error`. Use `request_id` as the primary trace identifier. Logs must not include
+raw ticket IDs, ticket subjects, ticket descriptions, generated model content,
+credentials, or PII.
 
 ## Cloud Run Deployment
 
