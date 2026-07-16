@@ -2,7 +2,10 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from app.api.dependencies.services import get_ticket_analysis_service
 from app.main import app
+from app.schemas.tickets import TicketAnalysisRequest, TicketAnalysisResponse
+from app.services.ticket_analysis import TicketAnalysisProviderError
 
 
 def test_analyze_ticket_endpoint() -> None:
@@ -113,3 +116,35 @@ def test_analyze_ticket_rejects_unsupported_channel() -> None:
     body = response.json()
     assert body["error"]["code"] == "validation_error"
     assert body["error"]["details"][0]["loc"] == ["body", "channel"]
+
+
+def test_analyze_ticket_returns_503_for_service_failure() -> None:
+    class FailingTicketAnalysisService:
+        async def analyze(
+            self, ticket: TicketAnalysisRequest
+        ) -> TicketAnalysisResponse:
+            raise TicketAnalysisProviderError("provider failed")
+
+    app.dependency_overrides[get_ticket_analysis_service] = lambda: (
+        FailingTicketAnalysisService()
+    )
+    client = TestClient(app)
+    payload: dict[str, Any] = {
+        "ticket_id": "TICKET-104",
+        "subject": "Need help",
+        "description": "Please help me with my account.",
+        "channel": "email",
+    }
+
+    try:
+        response = client.post("/api/v1/tickets/analyze", json=payload)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "ticket_analysis_unavailable",
+            "message": "Ticket analysis is temporarily unavailable.",
+        }
+    }

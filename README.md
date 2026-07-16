@@ -2,10 +2,11 @@
 
 ## Project Overview
 
-Local FastAPI API for deterministic customer-support ticket analysis.
+FastAPI API for customer-support ticket analysis with a local deterministic mock
+provider and an optional Gemini on Vertex AI provider.
 
-This milestone intentionally does not include Gemini, Vertex AI, databases,
-Docker, Terraform, authentication, or cloud services.
+This milestone intentionally does not include databases, Docker, Terraform,
+authentication, RAG, agents, or deployment infrastructure.
 
 ## Architecture
 
@@ -19,6 +20,8 @@ API -> Service -> Schemas -> Core
 - Pydantic schemas define request and response contracts.
 - `TicketAnalysisService` defines the analysis interface.
 - `MockTicketAnalysisService` provides deterministic local analysis.
+- `GeminiTicketAnalysisService` provides the Vertex AI implementation behind the
+  same async service interface.
 - FastAPI dependency injection wires routes to the service.
 - Core logging emits structured request metadata and never logs ticket subject,
   description, or PII.
@@ -30,6 +33,31 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+## Provider Modes
+
+The API defaults to local mock mode:
+
+```bash
+export TICKET_ANALYSIS_PROVIDER=mock
+```
+
+Mock mode is deterministic, does not call external services, and is used by
+tests and local development.
+
+To use Gemini through Vertex AI, authenticate with Application Default
+Credentials and set the provider configuration:
+
+```bash
+gcloud auth application-default login
+export TICKET_ANALYSIS_PROVIDER=gemini
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+export GEMINI_MODEL="gemini-2.5-flash"
+```
+
+The service uses Vertex AI authentication through ADC. Do not set or store API
+keys for this project.
 
 ## Run Instructions
 
@@ -87,7 +115,6 @@ pytest
 
 ## Roadmap
 
-- Add real AI integration behind the existing service interface.
 - Add persistence and analytics after the local API contract is stable.
 - Add authentication and deployment infrastructure in later platform modules.
 - Add knowledge search, RAG, and agent workflows only after the core support

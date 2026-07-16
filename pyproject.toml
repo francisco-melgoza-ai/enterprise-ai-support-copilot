@@ -5,6 +5,7 @@ description = "Enterprise AI support copilot API"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi",
+    "google-genai",
     "uvicorn[standard]",
 ]
 
