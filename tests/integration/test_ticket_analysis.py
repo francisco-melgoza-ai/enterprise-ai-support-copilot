@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import pytest
@@ -40,6 +41,53 @@ def test_analyze_ticket_endpoint() -> None:
     assert body["escalation_reason"] is None
     assert body["suggested_response"]
     assert 0 <= body["confidence"] <= 1
+
+
+def test_analyze_ticket_response_includes_request_id_header() -> None:
+    client = TestClient(app)
+    payload: dict[str, Any] = {
+        "ticket_id": "TICKET-REQUEST-ID",
+        "subject": "Payment failed",
+        "description": "Invoice payment failed.",
+        "channel": "email",
+    }
+
+    response = client.post(
+        "/api/v1/tickets/analyze",
+        json=payload,
+        headers={"X-Request-ID": "incoming-request-id"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "incoming-request-id"
+
+
+def test_request_id_is_included_in_application_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    client = TestClient(app)
+    payload: dict[str, Any] = {
+        "ticket_id": "TICKET-LOGS",
+        "subject": "Sensitive subject should not appear",
+        "description": "Sensitive description should not appear",
+        "channel": "email",
+    }
+
+    response = client.post(
+        "/api/v1/tickets/analyze",
+        json=payload,
+        headers={"X-Request-ID": "log-request-id"},
+    )
+
+    assert response.status_code == 200
+    app_records = [
+        record for record in caplog.records if record.name.startswith("app.")
+    ]
+    assert app_records
+    assert all(record.request_id == "log-request-id" for record in app_records)
+    assert "Sensitive subject should not appear" not in caplog.text
+    assert "Sensitive description should not appear" not in caplog.text
 
 
 def test_analyze_ticket_defaults_customer_language() -> None:

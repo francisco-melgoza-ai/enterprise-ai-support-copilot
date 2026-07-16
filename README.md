@@ -124,6 +124,68 @@ mypy app
 pytest
 ```
 
+## Observability
+
+The API emits structured JSON logs for request handling, startup configuration,
+and Gemini ticket-analysis operations.
+
+Every request receives a correlation ID:
+
+- If the caller sends `X-Request-ID`, the API preserves it.
+- If the caller does not send `X-Request-ID`, the API generates a UUID.
+- The response always includes `X-Request-ID`.
+- Application logs produced during the request include `request_id`.
+
+Safe request log example:
+
+```json
+{
+  "level": "INFO",
+  "logger": "app.request",
+  "message": "request_completed",
+  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
+  "method": "POST",
+  "path": "/api/v1/tickets/analyze",
+  "status_code": 200,
+  "duration_ms": 12.4
+}
+```
+
+Safe startup log example:
+
+```json
+{
+  "level": "INFO",
+  "logger": "app.main",
+  "message": "application_startup",
+  "app_env": "production",
+  "provider": "gemini",
+  "model": "gemini-2.5-flash",
+  "cloud_region": "us-central1"
+}
+```
+
+Safe Gemini telemetry example:
+
+```json
+{
+  "level": "INFO",
+  "logger": "app.services.ticket_analysis",
+  "message": "gemini_ticket_analysis_completed",
+  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
+  "ticket_id": "TICKET-123",
+  "provider": "gemini",
+  "model": "gemini-2.5-flash",
+  "outcome": "success",
+  "attempt_count": 1,
+  "duration_ms": 842.3
+}
+```
+
+Gemini telemetry outcomes are `success`, `timeout`, `invalid_response`, and
+`error`. Logs must not include ticket subjects, ticket descriptions, generated
+model content, credentials, or PII.
+
 ## Cloud Run Deployment
 
 This project is prepared for Cloud Run source deployment with Google Cloud

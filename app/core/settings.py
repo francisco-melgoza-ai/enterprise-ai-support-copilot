@@ -7,10 +7,12 @@ from dotenv import load_dotenv
 DEFAULT_TICKET_ANALYSIS_PROVIDER = "mock"
 DEFAULT_GOOGLE_CLOUD_LOCATION = "us-central1"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_APP_ENV = "local"
 
 
 @dataclass(frozen=True)
 class TicketAnalysisSettings:
+    app_env: str
     provider: str
     google_cloud_project: str | None
     google_cloud_location: str
@@ -23,6 +25,7 @@ class TicketAnalysisSettings:
         load_dotenv(dotenv_path=dotenv_path, override=False)
 
         return cls(
+            app_env=os.getenv("APP_ENV", DEFAULT_APP_ENV).strip() or DEFAULT_APP_ENV,
             provider=os.getenv(
                 "TICKET_ANALYSIS_PROVIDER", DEFAULT_TICKET_ANALYSIS_PROVIDER
             ).strip()
