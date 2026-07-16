@@ -3,10 +3,12 @@
 ## Project Overview
 
 FastAPI API for customer-support ticket analysis with a local deterministic mock
-provider and an optional Gemini on Vertex AI provider.
+provider, an optional Gemini on Vertex AI provider, and an optional local
+retrieval layer for approved support knowledge.
 
-This milestone intentionally does not include databases, Terraform,
-application authentication, RAG, agents, or frontend work.
+This milestone intentionally does not include managed vector databases, Vertex
+AI RAG Engine, Vertex AI Search, Cloud Storage ingestion, BigQuery, Terraform,
+application authentication, agents, or frontend work.
 
 ## Architecture
 
@@ -22,6 +24,10 @@ API -> Service -> Schemas -> Core
 - `MockTicketAnalysisService` provides deterministic local analysis.
 - `GeminiTicketAnalysisService` provides the Vertex AI implementation behind the
   same async service interface.
+- `KnowledgeRetriever` defines the retrieval interface.
+- `LocalKnowledgeRetriever` loads synthetic approved support documents from
+  `sample_data/knowledge/`, chunks them deterministically, and ranks them with
+  lexical relevance.
 - FastAPI dependency injection wires routes to the service.
 - Core logging emits structured request metadata and never logs ticket subject,
   description, or PII.
@@ -45,12 +51,29 @@ export TICKET_ANALYSIS_PROVIDER=mock
 Mock mode is deterministic, does not call external services, and is used by
 tests and local development.
 
+Retrieval is disabled by default:
+
+```bash
+export KNOWLEDGE_PROVIDER=none
+```
+
+Enable local approved-knowledge retrieval for Gemini mode:
+
+```bash
+export KNOWLEDGE_PROVIDER=local
+```
+
+The local retriever reads Markdown and text files from `sample_data/knowledge/`.
+It does not call a vector database, Vertex AI RAG Engine, Vertex AI Search,
+Cloud Storage, BigQuery, or any other managed retrieval service.
+
 To use Gemini through Vertex AI, authenticate with Application Default
 Credentials and set the provider configuration:
 
 ```bash
 gcloud auth application-default login
 export TICKET_ANALYSIS_PROVIDER=gemini
+export KNOWLEDGE_PROVIDER=local
 export GOOGLE_CLOUD_PROJECT="your-project-id"
 export GOOGLE_CLOUD_LOCATION="us-central1"
 export GEMINI_MODEL="gemini-2.5-flash"
@@ -186,6 +209,24 @@ Gemini telemetry outcomes are `success`, `timeout`, `invalid_response`, and
 raw ticket IDs, ticket subjects, ticket descriptions, generated model content,
 credentials, or PII.
 
+Safe retrieval telemetry example:
+
+```json
+{
+  "level": "INFO",
+  "logger": "app.services.knowledge",
+  "message": "knowledge_retrieval_completed",
+  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
+  "provider": "local",
+  "retrieved_chunk_count": 2,
+  "outcome": "success",
+  "duration_ms": 3.1
+}
+```
+
+Retrieval logs must not include retrieved text, ticket content, generated model
+content, credentials, or sensitive filenames.
+
 ## Cloud Run Deployment
 
 This project is prepared for Cloud Run source deployment with Google Cloud
@@ -241,6 +282,8 @@ curl "$SERVICE_URL/health"
 - `PORT`: supplied by Cloud Run; the app startup command listens on this port.
 - `TICKET_ANALYSIS_PROVIDER`: optional, defaults to `mock`; valid values are
   `mock` and `gemini`.
+- `KNOWLEDGE_PROVIDER`: optional, defaults to `none`; valid values are `none`
+  and `local`.
 - `GOOGLE_CLOUD_PROJECT`: required only when `TICKET_ANALYSIS_PROVIDER=gemini`.
 - `GOOGLE_CLOUD_LOCATION`: optional, defaults to `us-central1`; should match the
   Vertex AI region.
@@ -253,6 +296,8 @@ from the service runtime environment.
 ## Roadmap
 
 - Add persistence and analytics after the local API contract is stable.
+- Replace the local lexical retriever with a managed GCP retriever behind the
+  existing `KnowledgeRetriever` interface when cloud retrieval is in scope.
 - Add authentication and deployment infrastructure in later platform modules.
 - Add knowledge search, RAG, and agent workflows only after the core support
   API is production-ready.

@@ -39,6 +39,7 @@ class JsonFormatter(logging.Formatter):
             "model",
             "outcome",
             "attempt_count",
+            "retrieved_chunk_count",
             "app_env",
             "cloud_region",
         ):
