@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Protocol
 
 from google import genai
@@ -31,6 +32,10 @@ class TicketAnalysisConfigurationError(TicketAnalysisServiceError):
 
 class TicketAnalysisProviderError(TicketAnalysisServiceError):
     """Raised when the configured provider cannot complete analysis."""
+
+    def __init__(self, message: str, *, is_timeout: bool = False) -> None:
+        super().__init__(message)
+        self.is_timeout = is_timeout
 
 
 class TicketAnalysisModelResponseError(TicketAnalysisServiceError):
@@ -192,10 +197,40 @@ class GeminiTicketAnalysisService:
         )
 
     async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
-        response = await self._generate_with_retries(ticket)
-        return self._parse_response(response)
+        started_at = time.perf_counter()
+        attempt_count = 0
+        outcome = "error"
 
-    async def _generate_with_retries(self, ticket: TicketAnalysisRequest) -> Any:
+        try:
+            response, attempt_count = await self._generate_with_retries(ticket)
+            result = self._parse_response(response)
+            outcome = "success"
+            return result
+        except TicketAnalysisModelResponseError:
+            outcome = "invalid_response"
+            attempt_count = max(attempt_count, 1)
+            raise
+        except TicketAnalysisProviderError as exc:
+            outcome = "timeout" if exc.is_timeout else "error"
+            attempt_count = max(attempt_count, self._max_attempts)
+            raise
+        finally:
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            logger.info(
+                "gemini_ticket_analysis_completed",
+                extra={
+                    "provider": "gemini",
+                    "model": self._model,
+                    "outcome": outcome,
+                    "attempt_count": attempt_count,
+                    "duration_ms": duration_ms,
+                    "ticket_id": ticket.ticket_id,
+                },
+            )
+
+    async def _generate_with_retries(
+        self, ticket: TicketAnalysisRequest
+    ) -> tuple[Any, int]:
         prompt = build_ticket_analysis_prompt(ticket)
         config = types.GenerateContentConfig(
             system_instruction=TICKET_ANALYSIS_SYSTEM_PROMPT,
@@ -206,31 +241,38 @@ class GeminiTicketAnalysisService:
         )
 
         last_error: Exception | None = None
+        timed_out = False
         for attempt in range(1, self._max_attempts + 1):
             try:
-                return await asyncio.wait_for(
-                    self._model_client.generate_content(
-                        model=self._model,
-                        contents=prompt,
-                        config=config,
+                return (
+                    await asyncio.wait_for(
+                        self._model_client.generate_content(
+                            model=self._model,
+                            contents=prompt,
+                            config=config,
+                        ),
+                        timeout=self._timeout_seconds,
                     ),
-                    timeout=self._timeout_seconds,
+                    attempt,
                 )
             except TimeoutError as exc:
                 last_error = exc
+                timed_out = True
                 logger.warning(
                     "gemini_ticket_analysis_timeout",
                     extra={"ticket_id": ticket.ticket_id, "attempt": attempt},
                 )
             except Exception as exc:
                 last_error = exc
+                timed_out = False
                 logger.warning(
                     "gemini_ticket_analysis_attempt_failed",
                     extra={"ticket_id": ticket.ticket_id, "attempt": attempt},
                 )
 
         raise TicketAnalysisProviderError(
-            "Gemini ticket analysis failed after retry attempts."
+            "Gemini ticket analysis failed after retry attempts.",
+            is_timeout=timed_out,
         ) from last_error
 
     def _parse_response(self, response: Any) -> TicketAnalysisResponse:
