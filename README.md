@@ -4,11 +4,11 @@
 
 FastAPI API for customer-support ticket analysis with a local deterministic mock
 provider, an optional Gemini on Vertex AI provider, and an optional local
-retrieval layer for approved support knowledge.
+or managed Vertex AI RAG Engine retrieval layer for approved support knowledge.
 
-This milestone intentionally does not include managed vector databases, Vertex
-AI RAG Engine, Vertex AI Search, Cloud Storage ingestion, BigQuery, Terraform,
-application authentication, agents, or frontend work.
+This milestone intentionally does not include Vertex AI Search, custom Vector
+Search indexes, Document AI, upload APIs, BigQuery, Terraform, application
+authentication, agents, or frontend work.
 
 ## Architecture
 
@@ -28,6 +28,8 @@ API -> Service -> Schemas -> Core
 - `LocalKnowledgeRetriever` loads synthetic approved support documents from
   `sample_data/knowledge/`, chunks them deterministically, and ranks them with
   lexical relevance.
+- `VertexRagKnowledgeRetriever` retrieves managed passages from a configured
+  Vertex AI RAG Engine corpus and maps them into the same retrieval schema.
 - FastAPI dependency injection wires routes to the service.
 - Core logging emits structured request metadata and never logs ticket subject,
   description, or PII.
@@ -64,8 +66,27 @@ export KNOWLEDGE_PROVIDER=local
 ```
 
 The local retriever reads Markdown and text files from `sample_data/knowledge/`.
-It does not call a vector database, Vertex AI RAG Engine, Vertex AI Search,
-Cloud Storage, BigQuery, or any other managed retrieval service.
+It does not call a vector database, Vertex AI Search, Cloud Storage, BigQuery,
+or any other managed retrieval service.
+
+Enable managed Vertex AI RAG Engine retrieval for Gemini mode:
+
+```bash
+export KNOWLEDGE_PROVIDER=vertex_rag
+export RAG_CORPUS_RESOURCE_NAME="projects/your-project-id/locations/us-central1/ragCorpora/your-corpus-id"
+export RAG_LOCATION="us-central1"
+export RAG_TOP_K="3"
+export RAG_DISTANCE_THRESHOLD="0.5"
+```
+
+The corpus resource name format is:
+
+```text
+projects/{project}/locations/{location}/ragCorpora/{corpus_id}
+```
+
+The managed retriever uses Application Default Credentials and IAM. It does not
+use API keys or credential JSON files.
 
 To use Gemini through Vertex AI, authenticate with Application Default
 Credentials and set the provider configuration:
@@ -73,10 +94,12 @@ Credentials and set the provider configuration:
 ```bash
 gcloud auth application-default login
 export TICKET_ANALYSIS_PROVIDER=gemini
-export KNOWLEDGE_PROVIDER=local
+export KNOWLEDGE_PROVIDER=vertex_rag
 export GOOGLE_CLOUD_PROJECT="your-project-id"
 export GOOGLE_CLOUD_LOCATION="us-central1"
 export GEMINI_MODEL="gemini-2.5-flash"
+export RAG_CORPUS_RESOURCE_NAME="projects/your-project-id/locations/us-central1/ragCorpora/your-corpus-id"
+export RAG_LOCATION="us-central1"
 ```
 
 The service uses Vertex AI authentication through ADC. Do not set or store API
@@ -227,6 +250,21 @@ Safe retrieval telemetry example:
 Retrieval logs must not include retrieved text, ticket content, generated model
 content, credentials, or sensitive filenames.
 
+Safe managed RAG telemetry example:
+
+```json
+{
+  "level": "INFO",
+  "logger": "app.services.knowledge",
+  "message": "knowledge_retrieval_completed",
+  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
+  "provider": "vertex_rag",
+  "retrieved_chunk_count": 3,
+  "outcome": "success",
+  "duration_ms": 86.7
+}
+```
+
 ## Cloud Run Deployment
 
 This project is prepared for Cloud Run source deployment with Google Cloud
@@ -263,7 +301,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --project "$GOOGLE_CLOUD_PROJECT" \
   --region "$REGION" \
   --allow-unauthenticated \
-  --set-env-vars "TICKET_ANALYSIS_PROVIDER=gemini,GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GEMINI_MODEL=gemini-2.5-flash"
+  --set-env-vars "TICKET_ANALYSIS_PROVIDER=gemini,KNOWLEDGE_PROVIDER=vertex_rag,GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GEMINI_MODEL=gemini-2.5-flash,RAG_CORPUS_RESOURCE_NAME=projects/$GOOGLE_CLOUD_PROJECT/locations/$REGION/ragCorpora/YOUR_CORPUS_ID,RAG_LOCATION=$REGION"
 ```
 
 After deployment, verify the health endpoint:
@@ -283,21 +321,65 @@ curl "$SERVICE_URL/health"
 - `TICKET_ANALYSIS_PROVIDER`: optional, defaults to `mock`; valid values are
   `mock` and `gemini`.
 - `KNOWLEDGE_PROVIDER`: optional, defaults to `none`; valid values are `none`
-  and `local`.
+  `local`, and `vertex_rag`.
 - `GOOGLE_CLOUD_PROJECT`: required only when `TICKET_ANALYSIS_PROVIDER=gemini`.
 - `GOOGLE_CLOUD_LOCATION`: optional, defaults to `us-central1`; should match the
   Vertex AI region.
 - `GEMINI_MODEL`: optional, defaults to `gemini-2.5-flash`.
+- `RAG_CORPUS_RESOURCE_NAME`: required when `KNOWLEDGE_PROVIDER=vertex_rag`.
+  Format: `projects/{project}/locations/{location}/ragCorpora/{corpus_id}`.
+- `RAG_LOCATION`: optional, defaults to the Google Cloud location; should match
+  the RAG corpus location.
+- `RAG_TOP_K`: optional, defaults to `3`.
+- `RAG_DISTANCE_THRESHOLD`: optional, defaults to `0.5`.
 
 Do not commit credentials, API keys, service account keys, or project-specific
-secrets. In Cloud Run, the Gemini provider uses Application Default Credentials
-from the service runtime environment.
+secrets. In Cloud Run, Gemini and Vertex RAG providers use Application Default
+Credentials from the service runtime environment.
+
+## Vertex AI RAG Engine Operations
+
+Install dependencies and authenticate locally with ADC:
+
+```bash
+pip install -e ".[dev]"
+gcloud auth application-default login
+```
+
+Create or reuse a managed RAG corpus and import files from Cloud Storage:
+
+```bash
+python scripts/provision_rag_corpus.py \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --location "us-central1" \
+  --display-name "support-copilot-knowledge" \
+  --gcs-uri "gs://YOUR_BUCKET/support-knowledge/*"
+```
+
+The script prints the full corpus resource name. Store that value in
+`RAG_CORPUS_RESOURCE_NAME`.
+
+Verify retrieval without calling Gemini:
+
+```bash
+python scripts/verify_rag_retrieval.py \
+  --corpus-resource-name "$RAG_CORPUS_RESOURCE_NAME" \
+  --query "Customer cannot reset MFA"
+```
+
+Least-privilege IAM for the runtime service account:
+
+- `roles/aiplatform.user` on the project or a narrower resource scope that can
+  retrieve from the configured corpus.
+
+For provisioning imports from Cloud Storage, the identity running
+`scripts/provision_rag_corpus.py` also needs read access to the source objects,
+for example `roles/storage.objectViewer` on the import bucket.
 
 ## Roadmap
 
 - Add persistence and analytics after the local API contract is stable.
-- Replace the local lexical retriever with a managed GCP retriever behind the
-  existing `KnowledgeRetriever` interface when cloud retrieval is in scope.
+- Expand managed retrieval operations after the RAG corpus workflow is proven.
 - Add authentication and deployment infrastructure in later platform modules.
-- Add knowledge search, RAG, and agent workflows only after the core support
-  API is production-ready.
+- Add knowledge search and agent workflows only after the core support API is
+  production-ready.

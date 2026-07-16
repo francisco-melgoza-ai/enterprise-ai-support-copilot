@@ -1,9 +1,10 @@
+import asyncio
 import logging
 import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.schemas.retrieval import RetrievedPassage
 from app.schemas.tickets import TicketAnalysisRequest
@@ -15,6 +16,10 @@ SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt"}
 CHUNK_MAX_WORDS = 120
 CHUNK_OVERLAP_WORDS = 20
 DEFAULT_TOP_K = 3
+DEFAULT_VERTEX_RAG_PROVIDER = "vertex_rag"
+RAG_CORPUS_RESOURCE_PATTERN = re.compile(
+    r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/ragCorpora/[^/]+$"
+)
 STOPWORDS = {
     "a",
     "an",
@@ -42,6 +47,30 @@ STOPWORDS = {
 class KnowledgeRetriever(Protocol):
     async def retrieve(self, ticket: TicketAnalysisRequest) -> list[RetrievedPassage]:
         """Retrieve approved support passages relevant to a ticket."""
+
+
+class VertexRagAdapter(Protocol):
+    async def retrieve_contexts(
+        self,
+        *,
+        corpus_resource_name: str,
+        query_text: str,
+        top_k: int,
+        distance_threshold: float,
+    ) -> object:
+        """Retrieve raw contexts from a managed Vertex AI RAG corpus."""
+
+
+class KnowledgeConfigurationError(ValueError):
+    """Raised when knowledge retrieval is not configured correctly."""
+
+
+class KnowledgeRetrievalError(RuntimeError):
+    """Raised when managed knowledge retrieval fails."""
+
+
+class KnowledgeResponseError(KnowledgeRetrievalError):
+    """Raised when managed retrieval returns an unexpected response shape."""
 
 
 class LocalKnowledgeRetriever:
@@ -179,3 +208,259 @@ class _KnowledgeDocument:
     def __init__(self, *, path: Path, content: str) -> None:
         self.path = path
         self.content = content
+
+
+class VertexRagKnowledgeRetriever:
+    def __init__(
+        self,
+        *,
+        corpus_resource_name: str,
+        project: str,
+        location: str,
+        top_k: int = DEFAULT_TOP_K,
+        distance_threshold: float = 0.5,
+        adapter: VertexRagAdapter | None = None,
+    ) -> None:
+        if not corpus_resource_name.strip():
+            raise KnowledgeConfigurationError("RAG_CORPUS_RESOURCE_NAME is required.")
+        if not project.strip():
+            raise KnowledgeConfigurationError(
+                "GOOGLE_CLOUD_PROJECT or a project in RAG_CORPUS_RESOURCE_NAME "
+                "is required."
+            )
+        if not location.strip():
+            raise KnowledgeConfigurationError("RAG_LOCATION is required.")
+        if top_k <= 0:
+            raise KnowledgeConfigurationError("RAG_TOP_K must be positive.")
+        if distance_threshold < 0:
+            raise KnowledgeConfigurationError(
+                "RAG_DISTANCE_THRESHOLD must be zero or greater."
+            )
+
+        self._corpus_resource_name = corpus_resource_name
+        self._top_k = top_k
+        self._distance_threshold = distance_threshold
+        self._adapter = adapter or AgentPlatformRagAdapter(
+            project=project,
+            location=location,
+        )
+
+    async def retrieve(self, ticket: TicketAnalysisRequest) -> list[RetrievedPassage]:
+        started_at = time.perf_counter()
+        outcome = "success"
+        passages: list[RetrievedPassage] = []
+
+        try:
+            response = await self._adapter.retrieve_contexts(
+                corpus_resource_name=self._corpus_resource_name,
+                query_text=self._query_text(ticket),
+                top_k=self._top_k,
+                distance_threshold=self._distance_threshold,
+            )
+            passages = self._map_response(response)
+            if not passages:
+                outcome = "no_results"
+            return passages
+        except TimeoutError as exc:
+            outcome = "timeout"
+            raise KnowledgeRetrievalError("Vertex RAG retrieval timed out.") from exc
+        except KnowledgeResponseError:
+            outcome = "error"
+            raise
+        except Exception as exc:
+            outcome = "error"
+            raise KnowledgeRetrievalError("Vertex RAG retrieval failed.") from exc
+        finally:
+            logger.info(
+                "knowledge_retrieval_completed",
+                extra={
+                    "provider": DEFAULT_VERTEX_RAG_PROVIDER,
+                    "retrieved_chunk_count": len(passages),
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "outcome": outcome,
+                },
+            )
+
+    def _query_text(self, ticket: TicketAnalysisRequest) -> str:
+        return f"{ticket.subject}\n\n{ticket.description}"
+
+    def _map_response(self, response: object) -> list[RetrievedPassage]:
+        contexts = _get_nested(response, ("contexts", "contexts"))
+        if contexts is None:
+            contexts = []
+        if not isinstance(contexts, list):
+            raise KnowledgeResponseError("Vertex RAG response contexts must be a list.")
+
+        passages: list[RetrievedPassage] = []
+        for context in contexts:
+            content = _optional_string(_get_value(context, "text"))
+            source_name = _optional_string(_get_value(context, "sourceDisplayName"))
+            source_path = _optional_string(_get_value(context, "sourceUri"))
+            score = _optional_float(_get_value(context, "score"))
+            distance = _optional_float(_get_value(context, "distance"))
+
+            if score is None and distance is not None:
+                score = max(0.0, 1.0 - distance)
+
+            if not content or not source_name or not source_path or score is None:
+                raise KnowledgeResponseError(
+                    "Vertex RAG response is missing required context fields."
+                )
+
+            passages.append(
+                RetrievedPassage(
+                    content=content,
+                    source_name=source_name,
+                    source_path=source_path,
+                    relevance_score=round(score, 6),
+                )
+            )
+
+        return passages
+
+
+class AgentPlatformRagAdapter:
+    def __init__(self, *, project: str, location: str) -> None:
+        self._project = project
+        self._location = location
+        self._client: Any | None = None
+        self._agent_types: Any | None = None
+        self._genai_types: Any | None = None
+
+    async def retrieve_contexts(
+        self,
+        *,
+        corpus_resource_name: str,
+        query_text: str,
+        top_k: int,
+        distance_threshold: float,
+    ) -> object:
+        return await asyncio.to_thread(
+            self._retrieve_contexts,
+            corpus_resource_name=corpus_resource_name,
+            query_text=query_text,
+            top_k=top_k,
+            distance_threshold=distance_threshold,
+        )
+
+    async def list_corpora(self) -> object:
+        return await asyncio.to_thread(self._client_instance().rag.list_corpora)
+
+    async def create_corpus(self, *, display_name: str) -> object:
+        agent_types = self._agent_types_module()
+        return await asyncio.to_thread(
+            self._client_instance().rag.create_corpus,
+            rag_corpus=agent_types.RagCorpus(displayName=display_name),
+        )
+
+    async def import_files(self, *, corpus_resource_name: str, gcs_uri: str) -> object:
+        agent_types = self._agent_types_module()
+        genai_types = self._genai_types_module()
+        import_config = agent_types.ImportRagFilesConfig(
+            gcsSource=genai_types.GcsSource(uris=[gcs_uri])
+        )
+        return await asyncio.to_thread(
+            self._client_instance().rag.import_files,
+            name=corpus_resource_name,
+            import_config=import_config,
+        )
+
+    def _retrieve_contexts(
+        self,
+        *,
+        corpus_resource_name: str,
+        query_text: str,
+        top_k: int,
+        distance_threshold: float,
+    ) -> object:
+        agent_types = self._agent_types_module()
+        genai_types = self._genai_types_module()
+        retrieval_config = genai_types.RagRetrievalConfig(
+            topK=top_k,
+            filter=genai_types.RagRetrievalConfigFilter(
+                vectorDistanceThreshold=distance_threshold
+            ),
+        )
+        vertex_rag_store = genai_types.VertexRagStore(
+            ragResources=[
+                genai_types.VertexRagStoreRagResource(
+                    ragCorpus=corpus_resource_name,
+                )
+            ],
+        )
+        query = agent_types.RagQuery(
+            text=query_text,
+            ragRetrievalConfig=retrieval_config,
+        )
+        return self._client_instance().rag.retrieve_contexts(
+            vertex_rag_store=vertex_rag_store,
+            query=query,
+        )
+
+    def _client_instance(self) -> Any:
+        if self._client is None:
+            import agentplatform  # type: ignore[import-untyped]
+
+            self._client = agentplatform.Client(
+                project=self._project,
+                location=self._location,
+            )
+        return self._client
+
+    def _agent_types_module(self) -> Any:
+        if self._agent_types is None:
+            from agentplatform import types as agent_types
+
+            self._agent_types = agent_types
+        return self._agent_types
+
+    def _genai_types_module(self) -> Any:
+        if self._genai_types is None:
+            from google.genai import types as genai_types
+
+            self._genai_types = genai_types
+        return self._genai_types
+
+
+def parse_rag_corpus_resource_name(resource_name: str) -> tuple[str, str]:
+    match = RAG_CORPUS_RESOURCE_PATTERN.match(resource_name)
+    if match is None:
+        raise KnowledgeConfigurationError(
+            "RAG_CORPUS_RESOURCE_NAME must use format "
+            "'projects/{project}/locations/{location}/ragCorpora/{corpus_id}'."
+        )
+    return match.group("project"), match.group("location")
+
+
+def _get_nested(value: object, path: tuple[str, ...]) -> object:
+    current = value
+    for key in path:
+        current = _get_value(current, key)
+        if current is None:
+            return None
+    return current
+
+
+def _get_value(value: object, key: str) -> object:
+    if isinstance(value, dict):
+        return value.get(key) or value.get(_camel_to_snake(key))
+    return getattr(value, key, None) or getattr(value, _camel_to_snake(key), None)
+
+
+def _camel_to_snake(value: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+
+
+def _optional_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None

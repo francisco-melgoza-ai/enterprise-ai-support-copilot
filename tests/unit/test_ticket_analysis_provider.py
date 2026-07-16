@@ -1,7 +1,7 @@
 import pytest
 
 from app.api.dependencies.services import get_ticket_analysis_service
-from app.services.knowledge import LocalKnowledgeRetriever
+from app.services.knowledge import LocalKnowledgeRetriever, VertexRagKnowledgeRetriever
 from app.services.ticket_analysis import (
     GeminiTicketAnalysisService,
     MockTicketAnalysisService,
@@ -55,6 +55,39 @@ def test_provider_can_enable_local_knowledge_for_gemini(
 
     assert isinstance(service, GeminiTicketAnalysisService)
     assert isinstance(service._knowledge_retriever, LocalKnowledgeRetriever)
+
+
+def test_provider_can_enable_vertex_rag_knowledge_for_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TICKET_ANALYSIS_PROVIDER", "gemini")
+    monkeypatch.setenv("KNOWLEDGE_PROVIDER", "vertex_rag")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
+    monkeypatch.setenv(
+        "RAG_CORPUS_RESOURCE_NAME",
+        "projects/test-project/locations/us-central1/ragCorpora/test-corpus",
+    )
+    get_ticket_analysis_service.cache_clear()
+
+    service = get_ticket_analysis_service()
+
+    assert isinstance(service, GeminiTicketAnalysisService)
+    assert isinstance(service._knowledge_retriever, VertexRagKnowledgeRetriever)
+
+
+def test_provider_rejects_vertex_rag_without_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TICKET_ANALYSIS_PROVIDER", "gemini")
+    monkeypatch.setenv("KNOWLEDGE_PROVIDER", "vertex_rag")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.delenv("RAG_CORPUS_RESOURCE_NAME", raising=False)
+    get_ticket_analysis_service.cache_clear()
+
+    with pytest.raises(TicketAnalysisConfigurationError):
+        get_ticket_analysis_service()
 
 
 def test_provider_rejects_unsupported_value(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -28,7 +28,7 @@ providers:
 - `MockTicketAnalysisService` for deterministic local development and tests.
 - `GeminiTicketAnalysisService` for Gemini through Vertex AI.
 
-The Gemini path can optionally use a local retrieval layer:
+The Gemini path can optionally use a retrieval layer:
 
 ```text
 API
@@ -38,18 +38,32 @@ API
 → Gemini prompt
 ```
 
-`KnowledgeRetriever` is an async protocol. `LocalKnowledgeRetriever` is the
-current implementation and reads synthetic Markdown or text support documents
-from `sample_data/knowledge/`. It splits documents into deterministic chunks and
-ranks them with lexical term overlap.
+`KnowledgeRetriever` is an async protocol. Current implementations are:
 
-The local retriever is intentionally not a managed RAG system. It does not use
-embeddings, Vertex AI RAG Engine, Vertex AI Vector Search, Vertex AI Search,
-Cloud Storage ingestion, BigQuery, upload endpoints, or new cloud resources.
+- `LocalKnowledgeRetriever`, which reads synthetic Markdown or text support
+  documents from `sample_data/knowledge/`, splits them into deterministic
+  chunks, and ranks them with lexical term overlap.
+- `VertexRagKnowledgeRetriever`, which retrieves passages from a configured
+  managed Vertex AI RAG Engine corpus and maps SDK results into the shared
+  `RetrievedPassage` schema.
 
-Future managed retrieval can replace `LocalKnowledgeRetriever` behind the same
-`KnowledgeRetriever` protocol without changing the API request or response
-contract.
+Provider selection is environment-based:
+
+- `KNOWLEDGE_PROVIDER=none`: no retrieval.
+- `KNOWLEDGE_PROVIDER=local`: local synthetic knowledge retrieval.
+- `KNOWLEDGE_PROVIDER=vertex_rag`: managed Vertex AI RAG Engine retrieval.
+
+The ticket-analysis API request and response contract does not change when the
+retrieval provider changes.
+
+The managed retriever isolates SDK calls behind an adapter, so tests mock the
+adapter and never require Google Cloud access. Runtime authentication uses
+Application Default Credentials and IAM. No API keys or credential files are
+stored in the repository.
+
+Safe retrieval telemetry records provider, retrieved chunk count, duration, and
+outcome only. Logs must not include query text, retrieved content, ticket
+content, generated model content, credentials, or sensitive source paths.
 
 ---
 
