@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import time
 from collections import Counter
@@ -17,6 +18,8 @@ SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt"}
 CHUNK_MAX_WORDS = 120
 CHUNK_OVERLAP_WORDS = 20
 DEFAULT_TOP_K = 3
+DEFAULT_LOCAL_RETRIEVAL_MIN_SCORE = 0.22
+LOCAL_RETRIEVAL_MIN_OVERLAP = 2
 DEFAULT_VERTEX_RAG_PROVIDER = "vertex_rag"
 RAG_CORPUS_RESOURCE_PATTERN = re.compile(
     r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/ragCorpora/[^/]+$"
@@ -42,6 +45,41 @@ STOPWORDS = {
     "the",
     "to",
     "with",
+    "about",
+    "after",
+    "can",
+    "could",
+    "customer",
+    "feature",
+    "features",
+    "find",
+    "general",
+    "help",
+    "how",
+    "issue",
+    "me",
+    "my",
+    "new",
+    "notes",
+    "page",
+    "preference",
+    "preferences",
+    "question",
+    "release",
+    "request",
+    "support",
+    "tell",
+    "thanks",
+    "understand",
+    "update",
+    "user",
+    "users",
+    "we",
+    "what",
+    "where",
+    "workspace",
+    "you",
+    "your",
 }
 
 
@@ -82,6 +120,7 @@ class LocalKnowledgeRetriever:
         top_k: int = DEFAULT_TOP_K,
         chunk_max_words: int = CHUNK_MAX_WORDS,
         chunk_overlap_words: int = CHUNK_OVERLAP_WORDS,
+        min_score: float | None = None,
     ) -> None:
         if top_k <= 0:
             raise ValueError("top_k must be positive.")
@@ -89,11 +128,17 @@ class LocalKnowledgeRetriever:
             raise ValueError("chunk_max_words must be positive.")
         if chunk_overlap_words < 0 or chunk_overlap_words >= chunk_max_words:
             raise ValueError("chunk_overlap_words must be less than chunk_max_words.")
+        configured_min_score = (
+            _local_retrieval_min_score_from_env() if min_score is None else min_score
+        )
+        if configured_min_score < 0:
+            raise ValueError("min_score must be zero or greater.")
 
         self._knowledge_directory = knowledge_directory
         self._top_k = top_k
         self._chunk_max_words = chunk_max_words
         self._chunk_overlap_words = chunk_overlap_words
+        self._min_score = configured_min_score
 
     async def retrieve(self, ticket: TicketAnalysisRequest) -> list[RetrievedPassage]:
         started_at = time.perf_counter()
@@ -128,7 +173,7 @@ class LocalKnowledgeRetriever:
         for document in self._load_documents():
             for chunk in self._chunk_document(document.content):
                 score = self._score_chunk(query_terms, chunk)
-                if score <= 0:
+                if score < self._min_score:
                     continue
                 scored.append(
                     RetrievedPassage(
@@ -194,6 +239,8 @@ class LocalKnowledgeRetriever:
             overlap += min(query_count, chunk_terms.get(term, 0))
 
         if overlap == 0:
+            return 0
+        if overlap < LOCAL_RETRIEVAL_MIN_OVERLAP:
             return 0
         return round(overlap / len(query_terms), 6)
 
@@ -512,3 +559,10 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, int | float):
         return float(value)
     return None
+
+
+def _local_retrieval_min_score_from_env() -> float:
+    value = os.getenv("LOCAL_RETRIEVAL_MIN_SCORE")
+    if value is None or not value.strip():
+        return DEFAULT_LOCAL_RETRIEVAL_MIN_SCORE
+    return float(value.strip())
