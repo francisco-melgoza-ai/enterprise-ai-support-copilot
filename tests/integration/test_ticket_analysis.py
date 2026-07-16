@@ -1,11 +1,21 @@
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies.services import get_ticket_analysis_service
 from app.main import app
 from app.schemas.tickets import TicketAnalysisRequest, TicketAnalysisResponse
 from app.services.ticket_analysis import TicketAnalysisProviderError
+
+
+@pytest.fixture(autouse=True)
+def use_mock_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TICKET_ANALYSIS_PROVIDER", "mock")
+    get_ticket_analysis_service.cache_clear()
+    yield
+    app.dependency_overrides.clear()
+    get_ticket_analysis_service.cache_clear()
 
 
 def test_analyze_ticket_endpoint() -> None:
