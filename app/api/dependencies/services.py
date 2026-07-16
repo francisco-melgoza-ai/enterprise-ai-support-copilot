@@ -1,7 +1,12 @@
 from functools import lru_cache
 
 from app.core.settings import TicketAnalysisSettings
-from app.services.knowledge import KnowledgeRetriever, LocalKnowledgeRetriever
+from app.services.knowledge import (
+    KnowledgeRetriever,
+    LocalKnowledgeRetriever,
+    VertexRagKnowledgeRetriever,
+    parse_rag_corpus_resource_name,
+)
 from app.services.ticket_analysis import (
     GeminiTicketAnalysisService,
     MockTicketAnalysisService,
@@ -40,7 +45,23 @@ def _get_knowledge_retriever(
         return None
     if provider == "local":
         return LocalKnowledgeRetriever()
+    if provider == "vertex_rag":
+        if settings.rag_corpus_resource_name is None:
+            raise TicketAnalysisConfigurationError(
+                "RAG_CORPUS_RESOURCE_NAME is required when "
+                "KNOWLEDGE_PROVIDER='vertex_rag'."
+            )
+        parsed_project, parsed_location = parse_rag_corpus_resource_name(
+            settings.rag_corpus_resource_name
+        )
+        return VertexRagKnowledgeRetriever(
+            corpus_resource_name=settings.rag_corpus_resource_name,
+            project=settings.google_cloud_project or parsed_project,
+            location=settings.rag_location or parsed_location,
+            top_k=settings.rag_top_k,
+            distance_threshold=settings.rag_distance_threshold,
+        )
 
     raise TicketAnalysisConfigurationError(
-        "Unsupported KNOWLEDGE_PROVIDER. Expected 'none' or 'local'."
+        "Unsupported KNOWLEDGE_PROVIDER. Expected 'none', 'local', or 'vertex_rag'."
     )
