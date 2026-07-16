@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 DEFAULT_TICKET_ANALYSIS_PROVIDER = "mock"
+DEFAULT_KNOWLEDGE_PROVIDER = "none"
 DEFAULT_GOOGLE_CLOUD_LOCATION = "us-central1"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_APP_ENV = "local"
@@ -14,6 +15,7 @@ DEFAULT_APP_ENV = "local"
 class TicketAnalysisSettings:
     app_env: str
     provider: str
+    knowledge_provider: str
     google_cloud_project: str | None
     google_cloud_location: str
     gemini_model: str
@@ -30,6 +32,10 @@ class TicketAnalysisSettings:
                 "TICKET_ANALYSIS_PROVIDER", DEFAULT_TICKET_ANALYSIS_PROVIDER
             ).strip()
             or DEFAULT_TICKET_ANALYSIS_PROVIDER,
+            knowledge_provider=os.getenv(
+                "KNOWLEDGE_PROVIDER", DEFAULT_KNOWLEDGE_PROVIDER
+            ).strip()
+            or DEFAULT_KNOWLEDGE_PROVIDER,
             google_cloud_project=_optional_env("GOOGLE_CLOUD_PROJECT"),
             google_cloud_location=os.getenv(
                 "GOOGLE_CLOUD_LOCATION", DEFAULT_GOOGLE_CLOUD_LOCATION

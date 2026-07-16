@@ -14,6 +14,7 @@ from app.schemas.tickets import (
     TicketPriority,
     TicketSentiment,
 )
+from app.services.knowledge import KnowledgeRetriever
 from app.services.prompts import (
     TICKET_ANALYSIS_SYSTEM_PROMPT,
     build_ticket_analysis_prompt,
@@ -162,6 +163,7 @@ class GeminiTicketAnalysisService:
         timeout_seconds: float = 20.0,
         max_attempts: int = 3,
         model_client: GeminiModelClient | None = None,
+        knowledge_retriever: KnowledgeRetriever | None = None,
     ) -> None:
         if not project:
             raise TicketAnalysisConfigurationError(
@@ -186,6 +188,7 @@ class GeminiTicketAnalysisService:
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._max_attempts = max_attempts
+        self._knowledge_retriever = knowledge_retriever
         self._model_client = (
             model_client
             or genai.Client(
@@ -230,7 +233,10 @@ class GeminiTicketAnalysisService:
     async def _generate_with_retries(
         self, ticket: TicketAnalysisRequest
     ) -> tuple[Any, int]:
-        prompt = build_ticket_analysis_prompt(ticket)
+        retrieved_passages = None
+        if self._knowledge_retriever is not None:
+            retrieved_passages = await self._knowledge_retriever.retrieve(ticket)
+        prompt = build_ticket_analysis_prompt(ticket, retrieved_passages)
         config = types.GenerateContentConfig(
             system_instruction=TICKET_ANALYSIS_SYSTEM_PROMPT,
             response_mime_type="application/json",

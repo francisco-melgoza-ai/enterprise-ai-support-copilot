@@ -7,6 +7,7 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
         "\n".join(
             [
                 "TICKET_ANALYSIS_PROVIDER=gemini",
+                "KNOWLEDGE_PROVIDER=local",
                 "GOOGLE_CLOUD_PROJECT=test-project",
                 "GOOGLE_CLOUD_LOCATION=us-east1",
                 "GEMINI_MODEL=gemini-test",
@@ -21,6 +22,7 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
     settings = TicketAnalysisSettings.from_env(dotenv_path)
 
     assert settings.provider == "gemini"
+    assert settings.knowledge_provider == "local"
     assert settings.google_cloud_project == "test-project"
     assert settings.google_cloud_location == "us-east1"
     assert settings.gemini_model == "gemini-test"
