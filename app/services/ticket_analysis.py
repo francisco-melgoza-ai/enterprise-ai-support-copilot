@@ -9,12 +9,12 @@ from app.schemas.tickets import (
 
 
 class TicketAnalysisService(Protocol):
-    def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
+    async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
         """Analyze a support ticket without mutating external state."""
 
 
 class MockTicketAnalysisService:
-    def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
+    async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
         text = f"{ticket.subject} {ticket.description}".lower()
         priority = self._priority(text)
         sentiment = self._sentiment(text)
