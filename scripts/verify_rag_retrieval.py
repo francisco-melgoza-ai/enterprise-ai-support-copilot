@@ -27,6 +27,7 @@ async def _verify(args: argparse.Namespace) -> None:
     project = args.project or parsed_project
     location = args.location or parsed_location
     adapter = AgentPlatformRagAdapter(project=project, location=location)
+
     retriever = VertexRagKnowledgeRetriever(
         corpus_resource_name=corpus_resource_name,
         project=project,
@@ -45,14 +46,14 @@ async def _verify(args: argparse.Namespace) -> None:
     )
 
     if not passages:
-        print("No passages retrieved.")
+        print("No relevant passages found.")
         return
 
     for index, passage in enumerate(passages, start=1):
         print(
             f"{index}. source_name={passage.source_name} "
             f"source_path={passage.source_path} "
-            f"relevance_score={passage.relevance_score}"
+            f"normalized_relevance_score={passage.relevance_score}"
         )
 
 

@@ -29,7 +29,10 @@ API -> Service -> Schemas -> Core
   `sample_data/knowledge/`, chunks them deterministically, and ranks them with
   lexical relevance.
 - `VertexRagKnowledgeRetriever` retrieves managed passages from a configured
-  Vertex AI RAG Engine corpus and maps them into the same retrieval schema.
+  Vertex AI RAG Engine corpus and maps them into the same retrieval schema. The
+  managed SDK value currently behaves as vector distance, where lower is better,
+  so the service converts it to the existing higher-is-better
+  `relevance_score` contract with `1 / (1 + distance)`.
 - FastAPI dependency injection wires routes to the service.
 - Core logging emits structured request metadata and never logs ticket subject,
   description, or PII.
@@ -87,6 +90,12 @@ projects/{project}/locations/{location}/ragCorpora/{corpus_id}
 
 The managed retriever uses Application Default Credentials and IAM. It does not
 use API keys or credential JSON files.
+
+Managed RAG retrieval preserves the existing `RetrievedPassage.relevance_score`
+contract. Vertex RAG's returned score is treated as vector distance, so the
+service normalizes it with `relevance_score = 1 / (1 + distance)` and sorts
+managed passages by normalized relevance descending. Local retriever scores are
+unchanged because they are already higher-is-better lexical relevance scores.
 
 To use Gemini through Vertex AI, authenticate with Application Default
 Credentials and set the provider configuration:
@@ -366,6 +375,9 @@ python scripts/verify_rag_retrieval.py \
   --corpus-resource-name "$RAG_CORPUS_RESOURCE_NAME" \
   --query "Customer cannot reset MFA"
 ```
+
+The verification script prints `normalized_relevance_score`, not raw Vertex RAG
+distance.
 
 Least-privilege IAM for the runtime service account:
 

@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -285,38 +286,58 @@ class VertexRagKnowledgeRetriever:
         return f"{ticket.subject}\n\n{ticket.description}"
 
     def _map_response(self, response: object) -> list[RetrievedPassage]:
-        contexts = _get_nested(response, ("contexts", "contexts"))
+        has_contexts, contexts_container = _get_value_if_present(response, "contexts")
+        if not has_contexts:
+            raise KnowledgeResponseError("Vertex RAG response is missing contexts.")
+        if contexts_container is None:
+            return []
+
+        has_context_results, contexts = _get_value_if_present(
+            contexts_container,
+            "contexts",
+        )
+        if not has_context_results:
+            raise KnowledgeResponseError(
+                "Vertex RAG response is missing context results."
+            )
         if contexts is None:
-            contexts = []
-        if not isinstance(contexts, list):
+            return []
+        if not isinstance(contexts, Sequence) or isinstance(contexts, str):
             raise KnowledgeResponseError("Vertex RAG response contexts must be a list.")
 
         passages: list[RetrievedPassage] = []
         for context in contexts:
             content = _optional_string(_get_value(context, "text"))
-            source_name = _optional_string(_get_value(context, "sourceDisplayName"))
-            source_path = _optional_string(_get_value(context, "sourceUri"))
-            score = _optional_float(_get_value(context, "score"))
-            distance = _optional_float(_get_value(context, "distance"))
+            source_path = _optional_string(_get_value(context, "source_uri"))
+            if not content or not source_path:
+                continue
 
-            if score is None and distance is not None:
-                score = max(0.0, 1.0 - distance)
+            source_name = _optional_string(
+                _get_value(context, "source_display_name")
+            ) or _source_name_from_uri(source_path)
+            distance = _optional_float(_get_value(context, "score"))
+            if distance is None or distance < 0:
+                continue
 
-            if not content or not source_name or not source_path or score is None:
-                raise KnowledgeResponseError(
-                    "Vertex RAG response is missing required context fields."
-                )
-
+            relevance_score = _normalized_relevance_score(distance)
             passages.append(
                 RetrievedPassage(
                     content=content,
                     source_name=source_name,
                     source_path=source_path,
-                    relevance_score=round(score, 6),
+                    relevance_score=relevance_score,
                 )
             )
 
-        return passages
+        return sorted(
+            passages,
+            key=lambda passage: (
+                -passage.relevance_score,
+                passage.source_path,
+                passage.source_name,
+                passage.content,
+            ),
+        )
 
 
 class AgentPlatformRagAdapter:
@@ -432,23 +453,50 @@ def parse_rag_corpus_resource_name(resource_name: str) -> tuple[str, str]:
     return match.group("project"), match.group("location")
 
 
-def _get_nested(value: object, path: tuple[str, ...]) -> object:
-    current = value
-    for key in path:
-        current = _get_value(current, key)
-        if current is None:
-            return None
-    return current
-
-
 def _get_value(value: object, key: str) -> object:
+    _present, field_value = _get_value_if_present(value, key)
+    return field_value
+
+
+def _get_value_if_present(value: object, key: str) -> tuple[bool, object]:
     if isinstance(value, dict):
-        return value.get(key) or value.get(_camel_to_snake(key))
-    return getattr(value, key, None) or getattr(value, _camel_to_snake(key), None)
+        for candidate in _field_name_candidates(key):
+            if candidate in value:
+                return True, value[candidate]
+        return False, None
+
+    for candidate in _field_name_candidates(key):
+        if hasattr(value, candidate):
+            return True, getattr(value, candidate)
+    return False, None
+
+
+def _field_name_candidates(key: str) -> tuple[str, ...]:
+    snake_key = _camel_to_snake(key)
+    camel_key = _snake_to_camel(key)
+    return tuple(dict.fromkeys((key, snake_key, camel_key)))
 
 
 def _camel_to_snake(value: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+
+
+def _snake_to_camel(value: str) -> str:
+    head, *tail = value.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
+
+def _source_name_from_uri(source_uri: str) -> str:
+    stripped = source_uri.rstrip("/")
+    final_segment = stripped.rsplit("/", maxsplit=1)[-1]
+    return final_segment or "vertex-rag-source"
+
+
+def _normalized_relevance_score(distance: float) -> float:
+    # Vertex RAG currently returns a vector distance in the SDK's score field.
+    # RetrievedPassage.relevance_score is higher-is-better, so normalize distance
+    # into the existing contract while preserving the ordering semantics.
+    return round(1 / (1 + distance), 6)
 
 
 def _optional_string(value: object) -> str | None:

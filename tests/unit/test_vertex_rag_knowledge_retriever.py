@@ -1,5 +1,5 @@
 import logging
-from types import SimpleNamespace
+import warnings
 
 import pytest
 
@@ -38,19 +38,50 @@ class FakeVertexRagAdapter:
         return self.response
 
 
+def test_installed_sdk_retrieve_contexts_response_shape() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agentplatform = pytest.importorskip("agentplatform")
+        agent_types = agentplatform.types
+
+    response = agent_types.RetrieveContextsResponse(
+        contexts=agent_types.RagContexts(
+            contexts=[
+                agent_types.RagContextsContext(
+                    source_uri="",
+                    source_display_name=None,
+                    text="",
+                    score=0.0,
+                )
+            ]
+        )
+    )
+
+    dumped = response.model_dump()
+    context = dumped["contexts"]["contexts"][0]
+
+    assert type(response).__name__ == "RetrieveContextsResponse"
+    assert list(type(response).model_fields.keys()) == ["contexts"]
+    assert {"source_uri", "source_display_name", "text", "score"} <= set(context)
+
+
 @pytest.mark.anyio
 async def test_vertex_rag_retriever_maps_successful_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agentplatform = pytest.importorskip("agentplatform")
+        agent_types = agentplatform.types
     adapter = FakeVertexRagAdapter(
-        SimpleNamespace(
-            contexts=SimpleNamespace(
+        agent_types.RetrieveContextsResponse(
+            contexts=agent_types.RagContexts(
                 contexts=[
-                    SimpleNamespace(
+                    agent_types.RagContextsContext(
                         text="Reset MFA through the account recovery procedure.",
-                        sourceDisplayName="account-access.md",
-                        sourceUri="gs://support-kb/account-access.md",
+                        source_display_name=None,
+                        source_uri="gs://support-kb/account-access.md",
                         score=0.82,
                     )
                 ]
@@ -64,7 +95,7 @@ async def test_vertex_rag_retriever_maps_successful_response(
     assert passages[0].content == "Reset MFA through the account recovery procedure."
     assert passages[0].source_name == "account-access.md"
     assert passages[0].source_path == "gs://support-kb/account-access.md"
-    assert passages[0].relevance_score == 0.82
+    assert passages[0].relevance_score == 0.549451
     assert adapter.calls[0]["top_k"] == 3
     telemetry = _telemetry_record(caplog)
     assert telemetry.provider == "vertex_rag"
@@ -74,6 +105,33 @@ async def test_vertex_rag_retriever_maps_successful_response(
     assert "Cannot access account" not in caplog.text
     assert "Reset MFA" not in caplog.text
     assert "gs://support-kb" not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_maps_dictionary_response() -> None:
+    retriever = _retriever(
+        FakeVertexRagAdapter(
+            {
+                "contexts": {
+                    "contexts": [
+                        {
+                            "text": "Escalate confirmed outages to incident command.",
+                            "source_display_name": "outage.md",
+                            "source_uri": "gs://support-kb/outage.md",
+                            "score": 0.75,
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert passages[0].content == "Escalate confirmed outages to incident command."
+    assert passages[0].source_name == "outage.md"
+    assert passages[0].source_path == "gs://support-kb/outage.md"
+    assert passages[0].relevance_score == 0.571429
 
 
 @pytest.mark.anyio
@@ -95,15 +153,72 @@ async def test_vertex_rag_retriever_returns_empty_list_for_no_results(
 
 
 @pytest.mark.anyio
-async def test_vertex_rag_retriever_rejects_malformed_sdk_response(
+async def test_vertex_rag_retriever_returns_empty_list_when_contexts_are_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agentplatform = pytest.importorskip("agentplatform")
+        agent_types = agentplatform.types
+    retriever = _retriever(FakeVertexRagAdapter(agent_types.RetrieveContextsResponse()))
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert passages == []
+    telemetry = _telemetry_record(caplog)
+    assert telemetry.provider == "vertex_rag"
+    assert telemetry.retrieved_chunk_count == 0
+    assert telemetry.outcome == "no_results"
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_returns_empty_list_when_nested_contexts_are_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agentplatform = pytest.importorskip("agentplatform")
+        agent_types = agentplatform.types
     retriever = _retriever(
         FakeVertexRagAdapter(
-            {"contexts": {"contexts": [{"sourceDisplayName": "missing-text.md"}]}}
+            agent_types.RetrieveContextsResponse(contexts=agent_types.RagContexts())
         )
     )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert passages == []
+    telemetry = _telemetry_record(caplog)
+    assert telemetry.provider == "vertex_rag"
+    assert telemetry.retrieved_chunk_count == 0
+    assert telemetry.outcome == "no_results"
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_returns_empty_list_for_dictionary_no_results(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    for response in (
+        {"contexts": None},
+        {"contexts": {"contexts": None}},
+        {"contexts": {"contexts": []}},
+    ):
+        retriever = _retriever(FakeVertexRagAdapter(response))
+
+        passages = await retriever.retrieve(_ticket())
+
+        assert passages == []
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_raises_for_completely_malformed_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    retriever = _retriever(FakeVertexRagAdapter({"not_contexts": []}))
 
     with pytest.raises(KnowledgeResponseError):
         await retriever.retrieve(_ticket())
@@ -112,6 +227,56 @@ async def test_vertex_rag_retriever_rejects_malformed_sdk_response(
     assert telemetry.provider == "vertex_rag"
     assert telemetry.retrieved_chunk_count == 0
     assert telemetry.outcome == "error"
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_raises_for_incompatible_contexts_structure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    retriever = _retriever(FakeVertexRagAdapter({"contexts": {"contexts": "bad"}}))
+
+    with pytest.raises(KnowledgeResponseError):
+        await retriever.retrieve(_ticket())
+
+    telemetry = _telemetry_record(caplog)
+    assert telemetry.provider == "vertex_rag"
+    assert telemetry.retrieved_chunk_count == 0
+    assert telemetry.outcome == "error"
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_skips_malformed_contexts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    retriever = _retriever(
+        FakeVertexRagAdapter(
+            {
+                "contexts": {
+                    "contexts": [
+                        {"source_display_name": "missing-text.md"},
+                        {
+                            "text": "Valid passage.",
+                            "source_uri": "gs://support-kb/valid.md",
+                            "source_display_name": "valid.md",
+                            "score": 0.5,
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert len(passages) == 1
+    assert passages[0].source_name == "valid.md"
+    assert passages[0].relevance_score == 0.666667
+    telemetry = _telemetry_record(caplog)
+    assert telemetry.provider == "vertex_rag"
+    assert telemetry.retrieved_chunk_count == 1
+    assert telemetry.outcome == "success"
 
 
 @pytest.mark.anyio
@@ -158,17 +323,49 @@ def test_vertex_rag_retriever_requires_corpus_configuration() -> None:
 
 
 @pytest.mark.anyio
-async def test_vertex_rag_retriever_maps_distance_to_relevance_score() -> None:
+async def test_vertex_rag_retriever_normalizes_and_sorts_distances() -> None:
     retriever = _retriever(
         FakeVertexRagAdapter(
             {
                 "contexts": {
                     "contexts": [
                         {
-                            "text": "Escalate confirmed outages to incident command.",
-                            "source_display_name": "outage.md",
-                            "source_uri": "gs://support-kb/outage.md",
-                            "distance": 0.25,
+                            "text": "Farther match.",
+                            "source_display_name": "far.md",
+                            "source_uri": "gs://support-kb/far.md",
+                            "score": 2.0,
+                        },
+                        {
+                            "text": "Closer match.",
+                            "source_display_name": "close.md",
+                            "source_uri": "gs://support-kb/close.md",
+                            "score": 0.25,
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert [passage.source_name for passage in passages] == ["close.md", "far.md"]
+    assert passages[0].relevance_score == 0.8
+    assert passages[1].relevance_score == 0.333333
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_zero_distance_maps_to_one() -> None:
+    retriever = _retriever(
+        FakeVertexRagAdapter(
+            {
+                "contexts": {
+                    "contexts": [
+                        {
+                            "text": "Exact match.",
+                            "source_display_name": "exact.md",
+                            "source_uri": "gs://support-kb/exact.md",
+                            "score": 0.0,
                         }
                     ]
                 }
@@ -178,9 +375,42 @@ async def test_vertex_rag_retriever_maps_distance_to_relevance_score() -> None:
 
     passages = await retriever.retrieve(_ticket())
 
-    assert passages[0].source_name == "outage.md"
-    assert passages[0].source_path == "gs://support-kb/outage.md"
-    assert passages[0].relevance_score == 0.75
+    assert passages[0].source_name == "exact.md"
+    assert passages[0].relevance_score == 1.0
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_skips_missing_or_invalid_distance() -> None:
+    retriever = _retriever(
+        FakeVertexRagAdapter(
+            {
+                "contexts": {
+                    "contexts": [
+                        {
+                            "text": "Missing score.",
+                            "source_uri": "gs://support-kb/missing.md",
+                        },
+                        {
+                            "text": "Invalid score.",
+                            "source_uri": "gs://support-kb/invalid.md",
+                            "score": -0.1,
+                        },
+                        {
+                            "text": "Valid score.",
+                            "source_uri": "gs://support-kb/valid.md",
+                            "score": 1.0,
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert len(passages) == 1
+    assert passages[0].source_name == "valid.md"
+    assert passages[0].relevance_score == 0.5
 
 
 def _retriever(adapter: FakeVertexRagAdapter) -> VertexRagKnowledgeRetriever:
