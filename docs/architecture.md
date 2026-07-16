@@ -69,7 +69,8 @@ knowledge. Current implementations are:
 
 - `LocalKnowledgeRetriever`: loads synthetic Markdown and text files from
   `sample_data/knowledge/`, chunks them deterministically, and ranks chunks with
-  lexical overlap.
+  lexical overlap. It applies stop-word filtering, requires meaningful token
+  overlap, and filters weak matches with `LOCAL_RETRIEVAL_MIN_SCORE`.
 - `VertexRagKnowledgeRetriever`: retrieves managed passages from a configured
   Vertex AI RAG Engine corpus.
 
@@ -251,6 +252,63 @@ ruff check .
 mypy app
 pytest
 ```
+
+## Evaluation Framework
+
+The evaluation framework is separate from the production API. It runs from
+`scripts/run_evaluation.py` and uses synthetic cases in
+`evaluation/data/support_cases.jsonl`.
+
+Default mode is cloud-independent:
+
+```text
+MockTicketAnalysisService
+↓
+LocalKnowledgeRetriever
+↓
+Deterministic metrics and reports
+```
+
+Live evaluation is explicit and opt-in:
+
+```text
+GeminiTicketAnalysisService
+↓
+VertexRagKnowledgeRetriever
+↓
+Vertex AI RAG Engine
+↓
+Gemini 2.5 Flash
+↓
+Evaluation metrics and reports
+```
+
+The evaluator measures:
+
+- Category accuracy
+- Priority accuracy
+- Escalation accuracy
+- JSON/schema validity rate
+- Retrieval hit rate
+- Expected-source top-1 accuracy
+- No-result correctness
+- Mean and p95 latency
+- Prohibited-claim pass rate
+
+Grounding checks do not require an evaluator model by default. They detect
+prohibited claims in `suggested_response`, check that no-knowledge cases do not
+invent procedural steps, and verify expected retrieved sources.
+
+Per-case output includes safe retrieval diagnostics: top score, retrieved count,
+whether no result was expected, and whether no result was returned. It does not
+include full ticket text or document content.
+
+Optional Gemini-as-judge evaluation is disabled by default. When enabled, it is
+clearly labeled as model-based and non-deterministic. It uses a separate
+evaluation prompt and does not reuse the production ticket-analysis prompt.
+
+Generated evaluation outputs are written as JSON and Markdown under
+`evaluation/results/`, which is ignored by Git.
 
 ## Out Of Scope
 

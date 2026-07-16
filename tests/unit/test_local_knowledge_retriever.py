@@ -38,7 +38,7 @@ def test_local_retriever_chunking_is_deterministic(tmp_path) -> None:
 
 @pytest.mark.anyio
 async def test_local_retriever_ranks_by_lexical_relevance(tmp_path) -> None:
-    (tmp_path / "account.md").write_text("Password reset invoice recovery.")
+    (tmp_path / "account.md").write_text("Password refund invoice recovery.")
     (tmp_path / "billing.md").write_text("Billing invoice refund dispute charge.")
     retriever = LocalKnowledgeRetriever(knowledge_directory=tmp_path, top_k=2)
 
@@ -46,6 +46,30 @@ async def test_local_retriever_ranks_by_lexical_relevance(tmp_path) -> None:
 
     assert passages[0].source_name == "billing.md"
     assert passages[0].relevance_score > passages[1].relevance_score
+
+
+@pytest.mark.anyio
+async def test_local_retriever_filters_weak_unrelated_matches(tmp_path) -> None:
+    (tmp_path / "account.md").write_text("Account recovery workflow procedure.")
+    retriever = LocalKnowledgeRetriever(knowledge_directory=tmp_path)
+
+    passages = await retriever.retrieve(_ticket("general account question"))
+
+    assert passages == []
+
+
+@pytest.mark.anyio
+async def test_local_retriever_min_score_can_be_configured(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_RETRIEVAL_MIN_SCORE", "0")
+    (tmp_path / "account.md").write_text("Account recovery workflow procedure.")
+    retriever = LocalKnowledgeRetriever(knowledge_directory=tmp_path)
+
+    passages = await retriever.retrieve(_ticket("account recovery"))
+
+    assert [passage.source_name for passage in passages] == ["account.md"]
 
 
 @pytest.mark.anyio

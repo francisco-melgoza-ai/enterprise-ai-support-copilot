@@ -170,6 +170,8 @@ Runtime environment variables:
 - `RAG_LOCATION`: optional, should match the RAG corpus location.
 - `RAG_TOP_K`: optional, defaults to `3`.
 - `RAG_DISTANCE_THRESHOLD`: optional, defaults to `0.5`.
+- `LOCAL_RETRIEVAL_MIN_SCORE`: optional, defaults to `0.22`; controls the
+  minimum lexical relevance score for local retrieval.
 
 Do not commit credentials, API keys, service account keys, or
 project-specific secrets.
@@ -351,6 +353,90 @@ python scripts/verify_rag_retrieval.py \
 The verification script prints `normalized_relevance_score`, not raw Vertex RAG
 distance. Empty retrieval prints `No relevant passages found.` and exits
 successfully.
+
+## Evaluation Framework
+
+The repository includes a local, repeatable evaluation framework for synthetic
+support cases. It measures retrieval quality, structured-output reliability,
+grounding behavior, latency, and ticket-analysis quality without requiring
+Google Cloud by default.
+
+Dataset:
+
+```text
+evaluation/data/support_cases.jsonl
+```
+
+Default local evaluation uses the deterministic mock analysis provider and local
+retrieval:
+
+```bash
+python scripts/run_evaluation.py \
+  --provider mock \
+  --knowledge-provider local \
+  --output evaluation/results/local.json \
+  --report evaluation/results/local.md
+```
+
+The evaluator writes:
+
+- JSON results with run configuration, aggregate metrics, thresholds, failed
+  cases, per-case results, provider/model information, and timestamp.
+- Markdown summary report with aggregate metrics, failed cases, and per-case
+  latency.
+
+Deterministic metrics include:
+
+- Category accuracy
+- Priority accuracy
+- Escalation accuracy
+- JSON/schema validity rate
+- Retrieval hit rate
+- Expected-source top-1 accuracy
+- No-result correctness
+- Mean latency
+- P95 latency
+- Prohibited-claim pass rate
+
+Groundedness checks are deterministic by default. They flag prohibited claims,
+check no-knowledge cases for invented procedural steps, and verify expected
+retrieved sources when applicable.
+
+Per-case evaluation output also includes safe retrieval diagnostics:
+
+- `top_score`
+- `retrieved_count`
+- `expected_no_result`
+- `actual_no_result`
+
+The diagnostics do not include full ticket text or document content.
+
+Optional live Gemini and Vertex RAG evaluation:
+
+```bash
+python scripts/run_evaluation.py \
+  --provider gemini \
+  --knowledge-provider vertex_rag \
+  --output evaluation/results/live-vertex-rag.json \
+  --report evaluation/results/live-vertex-rag.md
+```
+
+Optional Gemini-as-judge scoring is available behind `--gemini-judge`. Judge
+results are model-based, non-deterministic, disabled by default, and should be
+reviewed separately from deterministic metrics.
+
+Threshold-gated local run:
+
+```bash
+python scripts/run_evaluation.py \
+  --provider mock \
+  --knowledge-provider local \
+  --fail-on-threshold \
+  --min-schema-validity 1.0 \
+  --min-prohibited-claim-pass-rate 1.0
+```
+
+Generated evaluation reports under `evaluation/results/` are ignored by Git.
 
 ## Testing
 

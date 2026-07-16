@@ -12,6 +12,9 @@ dependencies = [
     "uvicorn[standard]",
 ]
 
+[project.scripts]
+support-copilot-evaluate = "evaluation.runner:main"
+
 [project.optional-dependencies]
 dev = [
     "httpx",
