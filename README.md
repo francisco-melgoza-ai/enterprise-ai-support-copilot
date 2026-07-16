@@ -2,94 +2,50 @@
 
 ## Project Overview
 
-FastAPI API for customer-support ticket analysis with a local deterministic mock
-provider, an optional Gemini on Vertex AI provider, and an optional local
-or managed Vertex AI RAG Engine retrieval layer for approved support knowledge.
+Enterprise AI Support Copilot is a production-oriented customer support ticket
+analysis API built with FastAPI, Gemini 2.5 Flash, Vertex AI, Vertex AI RAG
+Engine (Serverless), Cloud Run, structured logging, request correlation, and a
+deterministic local mock provider for development.
 
-This milestone intentionally does not include Vertex AI Search, custom Vector
-Search indexes, Document AI, upload APIs, BigQuery, Terraform, application
-authentication, agents, or frontend work.
+The service analyzes support tickets and returns a structured JSON response with
+summary, category, priority, sentiment, escalation guidance, a suggested support
+reply, and confidence. It supports local-only development with no cloud calls,
+Gemini generation through Vertex AI, and managed knowledge grounding through
+Vertex AI RAG Engine.
+
+This module intentionally does not implement BigQuery analytics, Terraform,
+CI/CD, authentication, agents, a frontend, or an automated knowledge ingestion
+pipeline yet.
 
 ## Architecture
 
-The Sprint 1 API follows a small layered shape:
-
 ```text
-API -> Service -> Schemas -> Core
+API
+↓
+Service
+↓
+KnowledgeRetriever
+↓
+Vertex AI RAG Engine
+↓
+Gemini 2.5 Flash
+↓
+Structured JSON Response
 ```
 
-- API routes handle HTTP concerns only.
-- Pydantic schemas define request and response contracts.
-- `TicketAnalysisService` defines the analysis interface.
-- `MockTicketAnalysisService` provides deterministic local analysis.
-- `GeminiTicketAnalysisService` provides the Vertex AI implementation behind the
-  same async service interface.
-- `KnowledgeRetriever` defines the retrieval interface.
-- `LocalKnowledgeRetriever` loads synthetic approved support documents from
-  `sample_data/knowledge/`, chunks them deterministically, and ranks them with
-  lexical relevance.
-- `VertexRagKnowledgeRetriever` retrieves managed passages from a configured
-  Vertex AI RAG Engine corpus and maps them into the same retrieval schema. The
-  managed SDK value currently behaves as vector distance, where lower is better,
-  so the service converts it to the existing higher-is-better
-  `relevance_score` contract with `1 / (1 + distance)`.
-- FastAPI dependency injection wires routes to the service.
-- Core logging emits structured request metadata and never logs ticket subject,
-  description, or PII.
-
-## Local Setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-## Provider Modes
-
-The API defaults to local mock mode:
-
-```bash
-export TICKET_ANALYSIS_PROVIDER=mock
-```
-
-Mock mode is deterministic, does not call external services, and is used by
-tests and local development.
-
-Retrieval is disabled by default:
-
-```bash
-export KNOWLEDGE_PROVIDER=none
-```
-
-Enable local approved-knowledge retrieval for Gemini mode:
-
-```bash
-export KNOWLEDGE_PROVIDER=local
-```
-
-The local retriever reads Markdown and text files from `sample_data/knowledge/`.
-It does not call a vector database, Vertex AI Search, Cloud Storage, BigQuery,
-or any other managed retrieval service.
-
-Enable managed Vertex AI RAG Engine retrieval for Gemini mode:
-
-```bash
-export KNOWLEDGE_PROVIDER=vertex_rag
-export RAG_CORPUS_RESOURCE_NAME="projects/your-project-id/locations/us-central1/ragCorpora/your-corpus-id"
-export RAG_LOCATION="us-central1"
-export RAG_TOP_K="3"
-export RAG_DISTANCE_THRESHOLD="0.5"
-```
-
-The corpus resource name format is:
-
-```text
-projects/{project}/locations/{location}/ragCorpora/{corpus_id}
-```
-
-The managed retriever uses Application Default Credentials and IAM. It does not
-use API keys or credential JSON files.
+- **API**: FastAPI routes expose `GET /health` and
+  `POST /api/v1/tickets/analyze`. Routes handle HTTP concerns and delegate
+  analysis work to the service layer.
+- **Service**: `TicketAnalysisService` is an async interface. The mock and
+  Gemini implementations share the same request and response contract.
+- **KnowledgeRetriever**: Optional async retrieval boundary. It can be disabled,
+  use local synthetic Markdown/text files, or call Vertex AI RAG Engine.
+- **Vertex AI RAG Engine**: Managed retrieval provider for approved support
+  knowledge from a configured RAG corpus.
+- **Gemini 2.5 Flash**: Generates structured ticket analysis using the ticket
+  and retrieved passages when managed retrieval is enabled.
+- **Structured JSON Response**: Pydantic validates the model output before the
+  API returns it.
 
 Managed RAG retrieval preserves the existing `RetrievedPassage.relevance_score`
 contract. Vertex RAG's returned score is treated as vector distance, so the
@@ -97,11 +53,99 @@ service normalizes it with `relevance_score = 1 / (1 + distance)` and sorts
 managed passages by normalized relevance descending. Local retriever scores are
 unchanged because they are already higher-is-better lexical relevance scores.
 
-To use Gemini through Vertex AI, authenticate with Application Default
-Credentials and set the provider configuration:
+## Features
+
+- Deterministic local mock provider
+- Gemini provider through Vertex AI
+- Vertex AI RAG Engine integration
+- Managed knowledge retrieval from a configured corpus
+- Structured JSON responses
+- Pydantic request and response validation
+- Async service boundaries
+- FastAPI dependency injection
+- Request correlation with `X-Request-ID`
+- Structured application logging
+- Unit and integration tests
+- Cloud Run deployment support
+
+## Production Validation
+
+The application successfully demonstrated this production flow:
+
+```text
+Cloud Run
+→ Vertex AI RAG Engine
+→ Gemini 2.5 Flash
+→ HTTP 200 response
+```
+
+Validated components:
+
+- Managed RAG corpus
+- Managed retrieval
+- Grounded Gemini generation
+- Structured API response
+- Correlated logging
+- Cloud Run deployment
+
+Observed validation facts:
+
+- Knowledge provider: `vertex_rag`
+- Retrieved chunk count: `3`
+- Gemini completed successfully
+- HTTP `200` returned
+- Request correlation verified using `X-Request-ID`
+
+Cloud Run tuning:
+
+- Initial deployment at `512 MiB` exceeded memory limits.
+- Increasing Cloud Run memory to `1 GiB` resolved the issue.
+
+## Local Development
+
+Create and activate a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Run locally:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+The API is available at `http://127.0.0.1:8000`.
+
+### Mock Mode
+
+Mock mode is deterministic, local-only, and does not call Google Cloud:
+
+```bash
+export TICKET_ANALYSIS_PROVIDER=mock
+export KNOWLEDGE_PROVIDER=none
+```
+
+### Gemini Mode
+
+Gemini mode uses Vertex AI with Application Default Credentials:
 
 ```bash
 gcloud auth application-default login
+export TICKET_ANALYSIS_PROVIDER=gemini
+export KNOWLEDGE_PROVIDER=none
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+export GEMINI_MODEL="gemini-2.5-flash"
+```
+
+### Vertex RAG Mode
+
+Vertex RAG mode adds managed retrieval before Gemini generation:
+
+```bash
 export TICKET_ANALYSIS_PROVIDER=gemini
 export KNOWLEDGE_PROVIDER=vertex_rag
 export GOOGLE_CLOUD_PROJECT="your-project-id"
@@ -109,44 +153,41 @@ export GOOGLE_CLOUD_LOCATION="us-central1"
 export GEMINI_MODEL="gemini-2.5-flash"
 export RAG_CORPUS_RESOURCE_NAME="projects/your-project-id/locations/us-central1/ragCorpora/your-corpus-id"
 export RAG_LOCATION="us-central1"
+export RAG_TOP_K="3"
+export RAG_DISTANCE_THRESHOLD="0.5"
 ```
 
-The service uses Vertex AI authentication through ADC. Do not set or store API
-keys for this project.
+Runtime environment variables:
 
-## Run Instructions
+- `APP_ENV`: optional, defaults to `local`.
+- `PORT`: supplied by Cloud Run; the production command listens on this port.
+- `TICKET_ANALYSIS_PROVIDER`: `mock` or `gemini`; defaults to `mock`.
+- `KNOWLEDGE_PROVIDER`: `none`, `local`, or `vertex_rag`; defaults to `none`.
+- `GOOGLE_CLOUD_PROJECT`: required for Gemini and Vertex RAG modes.
+- `GOOGLE_CLOUD_LOCATION`: optional, defaults to `us-central1`.
+- `GEMINI_MODEL`: optional, defaults to `gemini-2.5-flash`.
+- `RAG_CORPUS_RESOURCE_NAME`: required when `KNOWLEDGE_PROVIDER=vertex_rag`.
+- `RAG_LOCATION`: optional, should match the RAG corpus location.
+- `RAG_TOP_K`: optional, defaults to `3`.
+- `RAG_DISTANCE_THRESHOLD`: optional, defaults to `0.5`.
 
-```bash
-uvicorn app.main:app --reload
-```
-
-The API will be available at `http://127.0.0.1:8000`.
-
-The production process command is defined in `Procfile` for Cloud Run source
-deployments:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8080}"
-```
-
-## Endpoints
-
-- `GET /health`
-- `POST /api/v1/tickets/analyze`
-
-`GET /health` returns `200` with `{"status":"ok"}` and does not depend on
-Gemini, credentials, databases, or external services, so it is suitable for
-Cloud Run health checks.
+Do not commit credentials, API keys, service account keys, or
+project-specific secrets.
 
 ## API Examples
+
+Health check:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
+Analyze a ticket:
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/tickets/analyze \
   -H "Content-Type: application/json" \
+  -H "X-Request-ID: demo-request-001" \
   -d '{
     "ticket_id": "TICKET-123",
     "subject": "Payment failed",
@@ -155,34 +196,18 @@ curl -X POST http://127.0.0.1:8000/api/v1/tickets/analyze \
   }'
 ```
 
-## Ticket Analysis Request
+Request fields:
 
-```json
-{
-  "ticket_id": "TICKET-123",
-  "subject": "Payment failed",
-  "description": "Invoice payment failed and the customer is frustrated.",
-  "channel": "email",
-  "customer_language": "en"
-}
-```
-
-`channel` must be one of `web`, `email`, `chat`, or `phone`.
-`customer_language` is optional and defaults to `en`.
-
-## Testing Instructions
-
-```bash
-ruff format --check .
-ruff check .
-mypy app
-pytest
-```
+- `ticket_id`: non-empty string
+- `subject`: non-empty string, maximum 200 characters
+- `description`: non-empty string, maximum 5000 characters
+- `channel`: one of `web`, `email`, `chat`, or `phone`
+- `customer_language`: optional, defaults to `en`
 
 ## Observability
 
 The API emits structured JSON logs for request handling, startup configuration,
-and Gemini ticket-analysis operations.
+knowledge retrieval, and Gemini ticket-analysis operations.
 
 Every request receives a correlation ID:
 
@@ -206,17 +231,18 @@ Safe request log example:
 }
 ```
 
-Safe startup log example:
+Safe managed retrieval telemetry example:
 
 ```json
 {
   "level": "INFO",
-  "logger": "app.main",
-  "message": "application_startup",
-  "app_env": "production",
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
-  "cloud_region": "us-central1"
+  "logger": "app.services.knowledge",
+  "message": "knowledge_retrieval_completed",
+  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
+  "provider": "vertex_rag",
+  "retrieved_chunk_count": 3,
+  "outcome": "success",
+  "duration_ms": 86.7
 }
 ```
 
@@ -236,84 +262,59 @@ Safe Gemini telemetry example:
 }
 ```
 
-Gemini telemetry outcomes are `success`, `timeout`, `invalid_response`, and
-`error`. Use `request_id` as the primary trace identifier. Logs must not include
-raw ticket IDs, ticket subjects, ticket descriptions, generated model content,
-credentials, or PII.
+Logs must not include raw ticket IDs, ticket subjects, ticket descriptions,
+retrieved text, generated model content, credentials, or PII. Use `request_id`
+as the primary trace identifier.
 
-Safe retrieval telemetry example:
+## Deployment
 
-```json
-{
-  "level": "INFO",
-  "logger": "app.services.knowledge",
-  "message": "knowledge_retrieval_completed",
-  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
-  "provider": "local",
-  "retrieved_chunk_count": 2,
-  "outcome": "success",
-  "duration_ms": 3.1
-}
-```
-
-Retrieval logs must not include retrieved text, ticket content, generated model
-content, credentials, or sensitive filenames.
-
-Safe managed RAG telemetry example:
-
-```json
-{
-  "level": "INFO",
-  "logger": "app.services.knowledge",
-  "message": "knowledge_retrieval_completed",
-  "request_id": "b5f0f1de-9f9b-4d37-9f58-6c5b273ff6d9",
-  "provider": "vertex_rag",
-  "retrieved_chunk_count": 3,
-  "outcome": "success",
-  "duration_ms": 86.7
-}
-```
-
-## Cloud Run Deployment
-
-This project is prepared for Cloud Run source deployment with Google Cloud
+The project is prepared for Cloud Run source deployment with Google Cloud
 Buildpacks. A custom Dockerfile is not required for the current Python/FastAPI
 runtime.
 
-Set your deployment variables locally:
+The production process command is defined in `Procfile`:
 
 ```bash
-export SERVICE_NAME="enterprise-ai-support-copilot"
-export REGION="us-central1"
-export GOOGLE_CLOUD_PROJECT="your-project-id"
+uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8080}"
 ```
 
-Deploy in local mock mode:
-
-```bash
-gcloud run deploy "$SERVICE_NAME" \
-  --source . \
-  --project "$GOOGLE_CLOUD_PROJECT" \
-  --region "$REGION" \
-  --allow-unauthenticated \
-  --set-env-vars "TICKET_ANALYSIS_PROVIDER=mock"
-```
-
-Deploy with Gemini through Vertex AI:
+Enable Vertex AI:
 
 ```bash
 gcloud services enable aiplatform.googleapis.com \
   --project "$GOOGLE_CLOUD_PROJECT"
+```
 
+Deploy mock mode:
+
+```bash
 gcloud run deploy "$SERVICE_NAME" \
   --source . \
   --project "$GOOGLE_CLOUD_PROJECT" \
   --region "$REGION" \
   --allow-unauthenticated \
+  --memory "1Gi" \
+  --set-env-vars "TICKET_ANALYSIS_PROVIDER=mock,KNOWLEDGE_PROVIDER=none"
+```
+
+Deploy Gemini with Vertex RAG:
+
+```bash
+gcloud run deploy "$SERVICE_NAME" \
+  --source . \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --region "$REGION" \
+  --allow-unauthenticated \
+  --memory "1Gi" \
   --set-env-vars "TICKET_ANALYSIS_PROVIDER=gemini,KNOWLEDGE_PROVIDER=vertex_rag,GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GEMINI_MODEL=gemini-2.5-flash,RAG_CORPUS_RESOURCE_NAME=projects/$GOOGLE_CLOUD_PROJECT/locations/$REGION/ragCorpora/YOUR_CORPUS_ID,RAG_LOCATION=$REGION"
 ```
 
-After deployment, verify the health endpoint:
+Cloud Run uses the managed service account and Application Default Credentials
+for Vertex AI and RAG Engine access. Grant the runtime service account only the
+IAM permissions it needs, such as Vertex AI access to the configured project or
+resource scope. Do not deploy API keys or credential JSON files.
+
+Verify the health endpoint:
 
 ```bash
 SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
@@ -324,36 +325,7 @@ SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
 curl "$SERVICE_URL/health"
 ```
 
-### Runtime Environment Variables
-
-- `PORT`: supplied by Cloud Run; the app startup command listens on this port.
-- `TICKET_ANALYSIS_PROVIDER`: optional, defaults to `mock`; valid values are
-  `mock` and `gemini`.
-- `KNOWLEDGE_PROVIDER`: optional, defaults to `none`; valid values are `none`
-  `local`, and `vertex_rag`.
-- `GOOGLE_CLOUD_PROJECT`: required only when `TICKET_ANALYSIS_PROVIDER=gemini`.
-- `GOOGLE_CLOUD_LOCATION`: optional, defaults to `us-central1`; should match the
-  Vertex AI region.
-- `GEMINI_MODEL`: optional, defaults to `gemini-2.5-flash`.
-- `RAG_CORPUS_RESOURCE_NAME`: required when `KNOWLEDGE_PROVIDER=vertex_rag`.
-  Format: `projects/{project}/locations/{location}/ragCorpora/{corpus_id}`.
-- `RAG_LOCATION`: optional, defaults to the Google Cloud location; should match
-  the RAG corpus location.
-- `RAG_TOP_K`: optional, defaults to `3`.
-- `RAG_DISTANCE_THRESHOLD`: optional, defaults to `0.5`.
-
-Do not commit credentials, API keys, service account keys, or project-specific
-secrets. In Cloud Run, Gemini and Vertex RAG providers use Application Default
-Credentials from the service runtime environment.
-
 ## Vertex AI RAG Engine Operations
-
-Install dependencies and authenticate locally with ADC:
-
-```bash
-pip install -e ".[dev]"
-gcloud auth application-default login
-```
 
 Create or reuse a managed RAG corpus and import files from Cloud Storage:
 
@@ -377,21 +349,30 @@ python scripts/verify_rag_retrieval.py \
 ```
 
 The verification script prints `normalized_relevance_score`, not raw Vertex RAG
-distance.
+distance. Empty retrieval prints `No relevant passages found.` and exits
+successfully.
 
-Least-privilege IAM for the runtime service account:
+## Testing
 
-- `roles/aiplatform.user` on the project or a narrower resource scope that can
-  retrieve from the configured corpus.
+Run the local quality gate:
 
-For provisioning imports from Cloud Storage, the identity running
-`scripts/provision_rag_corpus.py` also needs read access to the source objects,
-for example `roles/storage.objectViewer` on the import bucket.
+```bash
+ruff format --check .
+ruff check .
+mypy app
+pytest
+```
+
+The test suite includes unit tests for providers, retrieval, settings, and
+Gemini service behavior, plus integration tests for the FastAPI endpoints.
+Managed Google Cloud calls are mocked in automated tests.
 
 ## Roadmap
 
-- Add persistence and analytics after the local API contract is stable.
-- Expand managed retrieval operations after the RAG corpus workflow is proven.
-- Add authentication and deployment infrastructure in later platform modules.
-- Add knowledge search and agent workflows only after the core support API is
-  production-ready.
+- BigQuery conversation analytics
+- Evaluation framework for ticket analysis quality
+- CI/CD pipeline
+- Terraform infrastructure modules
+- Knowledge ingestion pipeline
+- Hybrid retrieval
+- Monitoring dashboards
