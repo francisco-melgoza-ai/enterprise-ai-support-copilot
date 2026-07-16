@@ -1,5 +1,7 @@
 # Enterprise AI Support Copilot
 
+[![CI](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/ci.yml)
+
 ## Project Overview
 
 Enterprise AI Support Copilot is a production-oriented customer support ticket
@@ -437,6 +439,35 @@ python scripts/run_evaluation.py \
 ```
 
 Generated evaluation reports under `evaluation/results/` are ignored by Git.
+
+## Continuous Integration
+
+GitHub Actions runs the CI workflow on pull requests targeting `main`, pushes
+to `main`, and manual dispatches.
+
+CI quality gates:
+
+- `ruff format --check .`
+- `ruff check .`
+- `mypy app`
+- `pytest`
+- Deterministic local evaluation with `mock` analysis and `local` retrieval
+
+The CI evaluation is cloud-independent. It does not authenticate to Google
+Cloud, does not use Gemini, and does not call Vertex AI or Vertex AI RAG Engine.
+It runs:
+
+```bash
+python scripts/run_evaluation.py \
+  --provider mock \
+  --knowledge-provider local \
+  --dataset evaluation/data/support_cases.jsonl \
+  --output evaluation/results/ci \
+  --fail-on-threshold
+```
+
+The workflow uploads the generated evaluation JSON and Markdown report as the
+`evaluation-results` artifact, including when threshold evaluation fails.
 
 ## Testing
 
