@@ -1,5 +1,8 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 DEFAULT_TICKET_ANALYSIS_PROVIDER = "mock"
 DEFAULT_GOOGLE_CLOUD_LOCATION = "us-central1"
@@ -14,7 +17,11 @@ class TicketAnalysisSettings:
     gemini_model: str
 
     @classmethod
-    def from_env(cls) -> "TicketAnalysisSettings":
+    def from_env(
+        cls, dotenv_path: str | Path | None = None
+    ) -> "TicketAnalysisSettings":
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+
         return cls(
             provider=os.getenv(
                 "TICKET_ANALYSIS_PROVIDER", DEFAULT_TICKET_ANALYSIS_PROVIDER

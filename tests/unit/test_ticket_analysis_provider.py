@@ -8,8 +8,10 @@ from app.services.ticket_analysis import (
 )
 
 
-def test_provider_defaults_to_mock(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TICKET_ANALYSIS_PROVIDER", raising=False)
+def test_provider_defaults_blank_value_to_mock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TICKET_ANALYSIS_PROVIDER", "")
     get_ticket_analysis_service.cache_clear()
 
     service = get_ticket_analysis_service()
