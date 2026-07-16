@@ -17,4 +17,4 @@ async def analyze_ticket(
     service: Annotated[TicketAnalysisService, Depends(get_ticket_analysis_service)],
 ) -> TicketAnalysisResponse:
     logger.info("ticket_analysis_requested", extra={"ticket_id": ticket.ticket_id})
-    return service.analyze(ticket)
+    return await service.analyze(ticket)

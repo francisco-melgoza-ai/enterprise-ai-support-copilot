@@ -1,3 +1,5 @@
+import pytest
+
 from app.schemas.tickets import (
     TicketAnalysisRequest,
     TicketPriority,
@@ -6,7 +8,8 @@ from app.schemas.tickets import (
 from app.services.ticket_analysis import MockTicketAnalysisService
 
 
-def test_mock_service_returns_deterministic_analysis() -> None:
+@pytest.mark.anyio
+async def test_mock_service_returns_deterministic_analysis() -> None:
     service = MockTicketAnalysisService()
     ticket = TicketAnalysisRequest(
         ticket_id="TICKET-1",
@@ -15,8 +18,8 @@ def test_mock_service_returns_deterministic_analysis() -> None:
         channel="email",
     )
 
-    first = service.analyze(ticket)
-    second = service.analyze(ticket)
+    first = await service.analyze(ticket)
+    second = await service.analyze(ticket)
 
     assert first == second
     assert first.ticket_id == "TICKET-1"
@@ -28,7 +31,8 @@ def test_mock_service_returns_deterministic_analysis() -> None:
     assert 0 <= first.confidence <= 1
 
 
-def test_mock_service_escalates_urgent_tickets() -> None:
+@pytest.mark.anyio
+async def test_mock_service_escalates_urgent_tickets() -> None:
     service = MockTicketAnalysisService()
     ticket = TicketAnalysisRequest(
         ticket_id="TICKET-2",
@@ -37,14 +41,15 @@ def test_mock_service_escalates_urgent_tickets() -> None:
         channel="web",
     )
 
-    result = service.analyze(ticket)
+    result = await service.analyze(ticket)
 
     assert result.priority == TicketPriority.URGENT
     assert result.requires_escalation is True
     assert result.escalation_reason == "Urgent priority requires immediate escalation."
 
 
-def test_mock_service_escalates_angry_sentiment() -> None:
+@pytest.mark.anyio
+async def test_mock_service_escalates_angry_sentiment() -> None:
     service = MockTicketAnalysisService()
     ticket = TicketAnalysisRequest(
         ticket_id="TICKET-3",
@@ -53,7 +58,7 @@ def test_mock_service_escalates_angry_sentiment() -> None:
         channel="chat",
     )
 
-    result = service.analyze(ticket)
+    result = await service.analyze(ticket)
 
     assert result.category == "billing"
     assert result.sentiment == TicketSentiment.ANGRY
