@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from app.core.resilience import CircuitBreaker
 from app.core.settings import TicketAnalysisSettings
 from app.services.knowledge import (
     KnowledgeRetriever,
@@ -29,6 +30,11 @@ def get_ticket_analysis_service() -> TicketAnalysisService:
             location=settings.google_cloud_location,
             model=settings.gemini_model,
             knowledge_retriever=knowledge_retriever,
+            resilience_policy=settings.gemini_resilience,
+            circuit_breaker=CircuitBreaker(
+                component="gemini",
+                config=settings.gemini_resilience.circuit_breaker,
+            ),
         )
 
     raise TicketAnalysisConfigurationError(
@@ -60,6 +66,12 @@ def _get_knowledge_retriever(
             location=settings.rag_location or parsed_location,
             top_k=settings.rag_top_k,
             distance_threshold=settings.rag_distance_threshold,
+            resilience_policy=settings.rag_resilience,
+            circuit_breaker=CircuitBreaker(
+                component="vertex_rag",
+                config=settings.rag_resilience.circuit_breaker,
+            ),
+            graceful_degradation_enabled=(settings.rag_graceful_degradation_enabled),
         )
 
     raise TicketAnalysisConfigurationError(

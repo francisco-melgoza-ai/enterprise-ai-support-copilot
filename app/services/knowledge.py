@@ -1,14 +1,26 @@
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.core.metrics import record_retrieval_request
+from app.core.metrics import record_degraded_operation, record_retrieval_request
+from app.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    ResiliencePolicy,
+    RetryPolicy,
+    TimeoutPolicy,
+    failure_reason,
+    is_transient_exception,
+    run_with_resilience,
+)
 from app.core.tracing import get_tracer, record_span_exception, set_span_attributes
 from app.schemas.retrieval import RetrievedPassage
 from app.schemas.tickets import TicketAnalysisRequest
@@ -288,6 +300,11 @@ class VertexRagKnowledgeRetriever:
         top_k: int = DEFAULT_TOP_K,
         distance_threshold: float = 0.5,
         adapter: VertexRagAdapter | None = None,
+        resilience_policy: ResiliencePolicy | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        graceful_degradation_enabled: bool = False,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        random_source: Callable[[], float] | None = None,
     ) -> None:
         if not corpus_resource_name.strip():
             raise KnowledgeConfigurationError("RAG_CORPUS_RESOURCE_NAME is required.")
@@ -308,6 +325,25 @@ class VertexRagKnowledgeRetriever:
         self._corpus_resource_name = corpus_resource_name
         self._top_k = top_k
         self._distance_threshold = distance_threshold
+        self._resilience_policy = resilience_policy or ResiliencePolicy(
+            timeout=TimeoutPolicy(timeout_seconds=10),
+            retry=RetryPolicy(
+                max_attempts=1,
+                base_delay_seconds=0,
+                max_delay_seconds=0,
+                jitter_seconds=0,
+            ),
+            circuit_breaker=CircuitBreakerConfig(
+                enabled=False,
+                failure_threshold=1,
+                recovery_timeout_seconds=1,
+                half_open_max_calls=1,
+            ),
+        )
+        self._circuit_breaker = circuit_breaker
+        self._graceful_degradation_enabled = graceful_degradation_enabled
+        self._sleep = sleep
+        self._random_source = random_source
         self._adapter = adapter or AgentPlatformRagAdapter(
             project=project,
             location=location,
@@ -320,12 +356,21 @@ class VertexRagKnowledgeRetriever:
 
         with tracer.start_as_current_span("knowledge.retrieve") as span:
             span.set_attribute("knowledge.provider", DEFAULT_VERTEX_RAG_PROVIDER)
+            attempt_count = 0
             try:
-                response = await self._adapter.retrieve_contexts(
-                    corpus_resource_name=self._corpus_resource_name,
-                    query_text=self._query_text(ticket),
-                    top_k=self._top_k,
-                    distance_threshold=self._distance_threshold,
+                response, attempt_count = await run_with_resilience(
+                    lambda: self._adapter.retrieve_contexts(
+                        corpus_resource_name=self._corpus_resource_name,
+                        query_text=self._query_text(ticket),
+                        top_k=self._top_k,
+                        distance_threshold=self._distance_threshold,
+                    ),
+                    component=DEFAULT_VERTEX_RAG_PROVIDER,
+                    policy=self._resilience_policy,
+                    circuit_breaker=self._circuit_breaker,
+                    is_retryable=_is_retryable_rag_error,
+                    sleep=self._sleep or asyncio.sleep,
+                    random_source=self._random_source or random.random,
                 )
                 passages = self._map_response(response)
                 if not passages:
@@ -334,6 +379,9 @@ class VertexRagKnowledgeRetriever:
             except TimeoutError as exc:
                 outcome = "timeout"
                 record_span_exception(span, exc)
+                if self._should_degrade(exc):
+                    outcome = "degraded"
+                    return self._degraded_passages(exc)
                 raise KnowledgeRetrievalError(
                     "Vertex RAG retrieval timed out."
                 ) from exc
@@ -341,9 +389,19 @@ class VertexRagKnowledgeRetriever:
                 outcome = "error"
                 record_span_exception(span, exc)
                 raise
+            except CircuitOpenError as exc:
+                outcome = "open"
+                record_span_exception(span, exc)
+                if self._should_degrade(exc):
+                    outcome = "degraded"
+                    return self._degraded_passages(exc)
+                raise KnowledgeRetrievalError("Vertex RAG circuit is open.") from exc
             except Exception as exc:
                 outcome = "error"
                 record_span_exception(span, exc)
+                if self._should_degrade(exc):
+                    outcome = "degraded"
+                    return self._degraded_passages(exc)
                 raise KnowledgeRetrievalError("Vertex RAG retrieval failed.") from exc
             finally:
                 duration_seconds = time.perf_counter() - started_at
@@ -352,6 +410,15 @@ class VertexRagKnowledgeRetriever:
                     {
                         "knowledge.outcome": outcome,
                         "knowledge.retrieved_chunk_count": len(passages),
+                        "resilience.component": DEFAULT_VERTEX_RAG_PROVIDER,
+                        "resilience.retry_count": max(0, attempt_count - 1),
+                        "resilience.circuit_state": (
+                            self.provider_health().state.value
+                        ),
+                        "resilience.degraded": outcome == "degraded",
+                        "resilience.failure_reason": (
+                            outcome if outcome != "success" else None
+                        ),
                     },
                 )
                 record_retrieval_request(
@@ -369,6 +436,36 @@ class VertexRagKnowledgeRetriever:
                         "outcome": outcome,
                     },
                 )
+
+    def _should_degrade(self, exc: BaseException) -> bool:
+        if not self._graceful_degradation_enabled:
+            return False
+        if isinstance(exc, CircuitOpenError):
+            return True
+        return _is_retryable_rag_error(exc)
+
+    def _degraded_passages(self, exc: BaseException) -> list[RetrievedPassage]:
+        reason = failure_reason(exc)
+        record_degraded_operation(
+            component=DEFAULT_VERTEX_RAG_PROVIDER,
+            reason=reason,
+        )
+        logger.warning(
+            "knowledge_retrieval_degraded",
+            extra={"provider": DEFAULT_VERTEX_RAG_PROVIDER, "outcome": reason},
+        )
+        return []
+
+    def provider_health(self) -> Any:
+        if self._circuit_breaker is None:
+            from app.core.resilience import CircuitBreakerSnapshot, CircuitState
+
+            return CircuitBreakerSnapshot(
+                state=CircuitState.CLOSED,
+                consecutive_failure_count=0,
+                seconds_until_next_probe=0.0,
+            )
+        return self._circuit_breaker.snapshot()
 
     def _query_text(self, ticket: TicketAnalysisRequest) -> str:
         return f"{ticket.subject}\n\n{ticket.description}"
@@ -607,3 +704,15 @@ def _local_retrieval_min_score_from_env() -> float:
     if value is None or not value.strip():
         return DEFAULT_LOCAL_RETRIEVAL_MIN_SCORE
     return float(value.strip())
+
+
+def _is_retryable_rag_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            KnowledgeConfigurationError,
+            KnowledgeResponseError,
+        ),
+    ):
+        return False
+    return is_transient_exception(exc)

@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.settings import TicketAnalysisSettings
 
 
@@ -40,3 +42,37 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
     assert settings.rag_location == "us-east1"
     assert settings.rag_top_k == 5
     assert settings.rag_distance_threshold == 0.7
+
+
+def test_settings_load_resilience_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", "11")
+    monkeypatch.setenv("GEMINI_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("GEMINI_RETRY_BASE_DELAY_SECONDS", "0.5")
+    monkeypatch.setenv("GEMINI_RETRY_MAX_DELAY_SECONDS", "3")
+    monkeypatch.setenv("GEMINI_RETRY_JITTER_SECONDS", "0.2")
+    monkeypatch.setenv("GEMINI_CIRCUIT_BREAKER_ENABLED", "false")
+    monkeypatch.setenv("GEMINI_CIRCUIT_FAILURE_THRESHOLD", "7")
+    monkeypatch.setenv("GEMINI_CIRCUIT_RECOVERY_SECONDS", "20")
+    monkeypatch.setenv("GEMINI_CIRCUIT_HALF_OPEN_MAX_CALLS", "2")
+    monkeypatch.setenv("RAG_GRACEFUL_DEGRADATION_ENABLED", "false")
+
+    settings = TicketAnalysisSettings.from_env()
+
+    assert settings.gemini_resilience.timeout.timeout_seconds == 11
+    assert settings.gemini_resilience.retry.max_attempts == 4
+    assert settings.gemini_resilience.retry.base_delay_seconds == 0.5
+    assert settings.gemini_resilience.retry.max_delay_seconds == 3
+    assert settings.gemini_resilience.retry.jitter_seconds == 0.2
+    assert not settings.gemini_resilience.circuit_breaker.enabled
+    assert settings.gemini_resilience.circuit_breaker.failure_threshold == 7
+    assert settings.gemini_resilience.circuit_breaker.recovery_timeout_seconds == 20
+    assert settings.gemini_resilience.circuit_breaker.half_open_max_calls == 2
+    assert not settings.rag_graceful_degradation_enabled
+
+
+def test_settings_reject_invalid_resilience_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_RETRY_BASE_DELAY_SECONDS", "2")
+    monkeypatch.setenv("RAG_RETRY_MAX_DELAY_SECONDS", "1")
+
+    with pytest.raises(ValueError):
+        TicketAnalysisSettings.from_env()

@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import random
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from google import genai
@@ -9,6 +11,17 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.core.metrics import record_provider_request
+from app.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    ResiliencePolicy,
+    RetryPolicy,
+    TimeoutPolicy,
+    failure_reason,
+    is_transient_exception,
+    run_with_resilience,
+)
 from app.core.tracing import get_tracer, record_span_exception, set_span_attributes
 from app.schemas.tickets import (
     TicketAnalysisRequest,
@@ -40,6 +53,7 @@ class TicketAnalysisProviderError(TicketAnalysisServiceError):
     def __init__(self, message: str, *, is_timeout: bool = False) -> None:
         super().__init__(message)
         self.is_timeout = is_timeout
+        self.retry_after_seconds: float | None = None
 
 
 class TicketAnalysisModelResponseError(TicketAnalysisServiceError):
@@ -167,6 +181,10 @@ class GeminiTicketAnalysisService:
         max_attempts: int = 3,
         model_client: GeminiModelClient | None = None,
         knowledge_retriever: KnowledgeRetriever | None = None,
+        resilience_policy: ResiliencePolicy | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        random_source: Callable[[], float] | None = None,
     ) -> None:
         if not project:
             raise TicketAnalysisConfigurationError(
@@ -181,16 +199,27 @@ class GeminiTicketAnalysisService:
             raise TicketAnalysisConfigurationError(
                 "GEMINI_MODEL is required when TICKET_ANALYSIS_PROVIDER=gemini."
             )
-        if timeout_seconds <= 0:
-            raise TicketAnalysisConfigurationError("Gemini timeout must be positive.")
-        if max_attempts <= 0:
-            raise TicketAnalysisConfigurationError(
-                "Gemini retry attempts must be positive."
-            )
-
         self._model = model
-        self._timeout_seconds = timeout_seconds
-        self._max_attempts = max_attempts
+        self._resilience_policy = resilience_policy or ResiliencePolicy(
+            timeout=TimeoutPolicy(timeout_seconds=timeout_seconds),
+            retry=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay_seconds=0,
+                max_delay_seconds=0,
+                jitter_seconds=0,
+            ),
+            circuit_breaker=(
+                CircuitBreakerConfig(
+                    enabled=False,
+                    failure_threshold=1,
+                    recovery_timeout_seconds=1,
+                    half_open_max_calls=1,
+                )
+            ),
+        )
+        self._circuit_breaker = circuit_breaker
+        self._sleep = sleep
+        self._random_source = random_source
         self._knowledge_retriever = knowledge_retriever
         self._model_client = (
             model_client
@@ -232,15 +261,34 @@ class GeminiTicketAnalysisService:
                     raise
                 except TicketAnalysisProviderError as exc:
                     outcome = "timeout" if exc.is_timeout else "error"
-                    attempt_count = max(attempt_count, self._max_attempts)
+                    attempt_count = max(
+                        attempt_count,
+                        self._resilience_policy.retry.max_attempts,
+                    )
                     record_span_exception(span, exc)
                     raise
+                except CircuitOpenError as exc:
+                    outcome = "error"
+                    provider_error = TicketAnalysisProviderError(
+                        "Gemini circuit is open."
+                    )
+                    provider_error.retry_after_seconds = exc.retry_after_seconds
+                    record_span_exception(span, provider_error)
+                    raise provider_error from exc
                 finally:
                     set_span_attributes(
                         span,
                         {
                             "ai.outcome": outcome,
                             "retry.attempt_count": attempt_count,
+                            "resilience.component": "gemini",
+                            "resilience.retry_count": max(0, attempt_count - 1),
+                            "resilience.circuit_state": (
+                                self.provider_health().state.value
+                            ),
+                            "resilience.failure_reason": (
+                                outcome if outcome != "success" else None
+                            ),
                         },
                     )
         finally:
@@ -285,39 +333,32 @@ class GeminiTicketAnalysisService:
         config: types.GenerateContentConfig,
     ) -> tuple[Any, int]:
         last_error: Exception | None = None
-        timed_out = False
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                return (
-                    await asyncio.wait_for(
-                        self._model_client.generate_content(
-                            model=self._model,
-                            contents=prompt,
-                            config=config,
-                        ),
-                        timeout=self._timeout_seconds,
-                    ),
-                    attempt,
-                )
-            except TimeoutError as exc:
-                last_error = exc
-                timed_out = True
-                logger.warning(
-                    "gemini_ticket_analysis_timeout",
-                    extra={"attempt": attempt},
-                )
-            except Exception as exc:
-                last_error = exc
-                timed_out = False
-                logger.warning(
-                    "gemini_ticket_analysis_attempt_failed",
-                    extra={"attempt": attempt},
-                )
-
-        raise TicketAnalysisProviderError(
-            "Gemini ticket analysis failed after retry attempts.",
-            is_timeout=timed_out,
-        ) from last_error
+        try:
+            return await run_with_resilience(
+                lambda: self._model_client.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=config,
+                ),
+                component="gemini",
+                policy=self._resilience_policy,
+                circuit_breaker=self._circuit_breaker,
+                is_retryable=_is_retryable_gemini_error,
+                sleep=self._sleep or asyncio.sleep,
+                random_source=self._random_source or random.random,
+            )
+        except CircuitOpenError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "gemini_ticket_analysis_attempt_failed",
+                extra={"outcome": failure_reason(exc)},
+            )
+            raise TicketAnalysisProviderError(
+                "Gemini ticket analysis failed after retry attempts.",
+                is_timeout=isinstance(exc, TimeoutError),
+            ) from last_error
 
     def _parse_response(self, response: Any) -> TicketAnalysisResponse:
         parsed = getattr(response, "parsed", None)
@@ -347,3 +388,26 @@ class GeminiTicketAnalysisService:
             raise TicketAnalysisModelResponseError(
                 "Gemini response did not match the ticket analysis schema."
             ) from exc
+
+    def provider_health(self) -> Any:
+        if self._circuit_breaker is None:
+            from app.core.resilience import CircuitBreakerSnapshot, CircuitState
+
+            return CircuitBreakerSnapshot(
+                state=CircuitState.CLOSED,
+                consecutive_failure_count=0,
+                seconds_until_next_probe=0.0,
+            )
+        return self._circuit_breaker.snapshot()
+
+
+def _is_retryable_gemini_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            TicketAnalysisModelResponseError,
+            TicketAnalysisConfigurationError,
+        ),
+    ):
+        return False
+    return is_transient_exception(exc)

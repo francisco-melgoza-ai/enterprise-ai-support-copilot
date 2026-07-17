@@ -3,6 +3,13 @@ import warnings
 
 import pytest
 
+from app.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    ResiliencePolicy,
+    RetryPolicy,
+    TimeoutPolicy,
+)
 from app.schemas.tickets import TicketAnalysisRequest
 from app.services.knowledge import (
     KnowledgeConfigurationError,
@@ -13,7 +20,7 @@ from app.services.knowledge import (
 
 
 class FakeVertexRagAdapter:
-    def __init__(self, response: object | Exception) -> None:
+    def __init__(self, response: object | Exception | list[object | Exception]) -> None:
         self.response = response
         self.calls: list[dict[str, object]] = []
 
@@ -33,9 +40,12 @@ class FakeVertexRagAdapter:
                 "distance_threshold": distance_threshold,
             }
         )
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+        response = self.response
+        if isinstance(response, list):
+            response = response.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def test_installed_sdk_retrieve_contexts_response_shape() -> None:
@@ -312,6 +322,73 @@ async def test_vertex_rag_retriever_reports_service_error(
     assert "service failed" not in caplog.text
 
 
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_retries_transient_failure() -> None:
+    adapter = FakeVertexRagAdapter(
+        [
+            ConnectionError(),
+            {"contexts": {"contexts": []}},
+        ]
+    )
+    retriever = _retriever(adapter, resilience_policy=_resilience_policy())
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert passages == []
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_retriever_open_circuit_prevents_invocation() -> None:
+    adapter = FakeVertexRagAdapter({"contexts": {"contexts": []}})
+    circuit = CircuitBreaker(
+        component="vertex_rag",
+        config=CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=1,
+            recovery_timeout_seconds=30,
+            half_open_max_calls=1,
+        ),
+    )
+    await circuit.record_failure()
+    retriever = _retriever(
+        adapter,
+        circuit_breaker=circuit,
+        resilience_policy=_resilience_policy(),
+    )
+
+    with pytest.raises(KnowledgeRetrievalError):
+        await retriever.retrieve(_ticket())
+
+    assert adapter.calls == []
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_graceful_degradation_returns_empty_passages() -> None:
+    adapter = FakeVertexRagAdapter(ConnectionError())
+    retriever = _retriever(
+        adapter,
+        resilience_policy=_resilience_policy(max_attempts=1),
+        graceful_degradation_enabled=True,
+    )
+
+    passages = await retriever.retrieve(_ticket())
+
+    assert passages == []
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_vertex_rag_non_degradable_mapping_failure_propagates() -> None:
+    retriever = _retriever(
+        FakeVertexRagAdapter({"not_contexts": []}),
+        graceful_degradation_enabled=True,
+    )
+
+    with pytest.raises(KnowledgeResponseError):
+        await retriever.retrieve(_ticket())
+
+
 def test_vertex_rag_retriever_requires_corpus_configuration() -> None:
     with pytest.raises(KnowledgeConfigurationError):
         VertexRagKnowledgeRetriever(
@@ -413,7 +490,13 @@ async def test_vertex_rag_retriever_skips_missing_or_invalid_distance() -> None:
     assert passages[0].relevance_score == 0.5
 
 
-def _retriever(adapter: FakeVertexRagAdapter) -> VertexRagKnowledgeRetriever:
+def _retriever(
+    adapter: FakeVertexRagAdapter,
+    *,
+    resilience_policy: ResiliencePolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
+    graceful_degradation_enabled: bool = False,
+) -> VertexRagKnowledgeRetriever:
     return VertexRagKnowledgeRetriever(
         corpus_resource_name=(
             "projects/test-project/locations/us-central1/ragCorpora/test-corpus"
@@ -423,6 +506,27 @@ def _retriever(adapter: FakeVertexRagAdapter) -> VertexRagKnowledgeRetriever:
         top_k=3,
         distance_threshold=0.5,
         adapter=adapter,
+        resilience_policy=resilience_policy,
+        circuit_breaker=circuit_breaker,
+        graceful_degradation_enabled=graceful_degradation_enabled,
+    )
+
+
+def _resilience_policy(max_attempts: int = 2) -> ResiliencePolicy:
+    return ResiliencePolicy(
+        timeout=TimeoutPolicy(timeout_seconds=1),
+        retry=RetryPolicy(
+            max_attempts=max_attempts,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+            jitter_seconds=0,
+        ),
+        circuit_breaker=CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=2,
+            recovery_timeout_seconds=30,
+            half_open_max_calls=1,
+        ),
     )
 
 

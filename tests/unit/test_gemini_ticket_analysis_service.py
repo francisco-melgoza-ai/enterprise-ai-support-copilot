@@ -4,12 +4,18 @@ from typing import Any
 
 import pytest
 
+from app.core.resilience import CircuitBreaker, CircuitBreakerConfig
 from app.schemas.retrieval import RetrievedPassage
 from app.schemas.tickets import TicketAnalysisRequest
+from app.services.knowledge import VertexRagKnowledgeRetriever
 from app.services.ticket_analysis import (
     GeminiTicketAnalysisService,
     TicketAnalysisModelResponseError,
     TicketAnalysisProviderError,
+)
+from tests.unit.test_vertex_rag_knowledge_retriever import (
+    FakeVertexRagAdapter,
+    _resilience_policy,
 )
 
 
@@ -116,7 +122,7 @@ async def test_gemini_service_raises_after_exhausted_retries(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
-    client = FakeGeminiModelClient([RuntimeError("failed"), RuntimeError("failed")])
+    client = FakeGeminiModelClient([ConnectionError(), ConnectionError()])
     service = _service(client, max_attempts=2)
 
     with pytest.raises(TicketAnalysisProviderError):
@@ -127,6 +133,27 @@ async def test_gemini_service_raises_after_exhausted_retries(
     assert telemetry.outcome == "error"
     assert telemetry.attempt_count == 2
     assert not hasattr(telemetry, "ticket_id")
+
+
+@pytest.mark.anyio
+async def test_gemini_service_open_circuit_prevents_provider_invocation() -> None:
+    client = FakeGeminiModelClient([_valid_response()])
+    circuit = CircuitBreaker(
+        component="gemini",
+        config=CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=1,
+            recovery_timeout_seconds=30,
+            half_open_max_calls=1,
+        ),
+    )
+    await circuit.record_failure()
+    service = _service(client, circuit_breaker=circuit)
+
+    with pytest.raises(TicketAnalysisProviderError):
+        await service.analyze(_ticket())
+
+    assert client.calls == 0
 
 
 @pytest.mark.anyio
@@ -176,6 +203,30 @@ async def test_gemini_service_skips_retrieval_when_disabled() -> None:
 
     request = client.requests[0]
     assert "Approved Support Knowledge" not in request["contents"]
+
+
+@pytest.mark.anyio
+async def test_gemini_service_continues_after_rag_degradation() -> None:
+    client = FakeGeminiModelClient([_valid_response()])
+    retriever = VertexRagKnowledgeRetriever(
+        corpus_resource_name=(
+            "projects/test-project/locations/us-central1/ragCorpora/test-corpus"
+        ),
+        project="test-project",
+        location="us-central1",
+        adapter=FakeVertexRagAdapter(ConnectionError()),
+        resilience_policy=_resilience_policy(max_attempts=1),
+        graceful_degradation_enabled=True,
+    )
+    service = _service(client, knowledge_retriever=retriever)
+
+    await service.analyze(_ticket())
+
+    assert client.calls == 1
+    assert (
+        "No approved support knowledge passages were retrieved"
+        in (client.requests[0]["contents"])
+    )
 
 
 @pytest.mark.anyio
@@ -265,6 +316,7 @@ def _service(
     *,
     max_attempts: int = 3,
     knowledge_retriever: FakeKnowledgeRetriever | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
 ) -> GeminiTicketAnalysisService:
     return GeminiTicketAnalysisService(
         project="test-project",
@@ -274,6 +326,7 @@ def _service(
         max_attempts=max_attempts,
         model_client=client,
         knowledge_retriever=knowledge_retriever,
+        circuit_breaker=circuit_breaker,
     )
 
 
