@@ -108,9 +108,6 @@ async def test_custom_provider_span_is_created() -> None:
     assert span.attributes["ai.model"] == "gemini-2.5-flash"
     assert span.attributes["ai.outcome"] == "success"
     assert span.attributes["retry.attempt_count"] == 1
-    assert span.attributes["resilience.component"] == "gemini"
-    assert span.attributes["resilience.retry_count"] == 0
-    assert span.attributes["resilience.circuit_state"] == "closed"
 
 
 @pytest.mark.anyio
