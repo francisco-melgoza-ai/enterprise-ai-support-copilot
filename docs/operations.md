@@ -82,8 +82,87 @@ Local verification:
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8000/ready
-curl http://localhost:8000/metrics
+curl http://localhost:8000/metrics \
+  -H "Authorization: Bearer mock:manager-456:support_manager"
 ```
+
+## Authentication Operations
+
+Authentication is selected with `AUTH_PROVIDER`.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AUTH_PROVIDER` | `mock` for local/test or `google` for Google OIDC tokens. | `mock` |
+| `AUTH_GOOGLE_AUDIENCE` | Expected audience for Google-issued identity tokens. Required when `AUTH_PROVIDER=google`. | unset |
+| `AUTH_MOCK_ALLOW_IN_PRODUCTION` | Allows mock auth when `APP_ENV=production`. This is unsafe and should remain `false`. | `false` |
+
+Local mock tokens use:
+
+```text
+Authorization: Bearer mock:<subject>:<role1,role2>
+```
+
+Roles:
+
+- `support_agent`: may call ticket analysis.
+- `support_manager`: may call ticket analysis and metrics.
+- `platform_admin`: may call ticket analysis and metrics.
+
+Examples:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/tickets/analyze \
+  -H "Authorization: Bearer mock:agent-123:support_agent" \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_id":"TICKET-1","subject":"Payment failed","description":"Invoice payment failed.","channel":"email"}'
+
+curl http://localhost:8000/metrics \
+  -H "Authorization: Bearer mock:manager-456:support_manager"
+```
+
+Google OIDC mode:
+
+```bash
+export AUTH_PROVIDER=google
+export AUTH_GOOGLE_AUDIENCE="https://YOUR-CLOUD-RUN-URL"
+```
+
+The application verifies Google-issued OIDC tokens with the official Google
+authentication library. It does not trust manually decoded JWT claims. Configure
+role claims in the issuing identity layer so tokens contain `roles` or `role`
+values matching the normalized support roles.
+
+Production CD requires `AUTH_PROVIDER=google`, requires
+`AUTH_GOOGLE_AUDIENCE`, and deploys `AUTH_MOCK_ALLOW_IN_PRODUCTION=false`.
+
+HTTP outcomes:
+
+- `401`: missing, malformed, expired, invalid, or unverifiable bearer token.
+- `403`: valid token without an allowed role.
+
+Safe telemetry:
+
+- Logs include authentication provider, outcome, authorization outcome, and
+  normalized roles.
+- Metrics include `support_copilot_authentication_requests_total` and
+  `support_copilot_authorization_requests_total`.
+- Traces include low-cardinality auth attributes.
+
+Never log bearer tokens, raw JWTs, authorization headers, full identity claims,
+or credentials. Mock authentication must not be enabled in production because
+it is not backed by an external identity provider or cryptographic token
+verification.
+
+### Authenticated Metrics Scraping
+
+`/metrics` remains protected in production. A Prometheus or Cloud Monitoring
+scraper must send a valid Google-issued OIDC bearer token whose claims map to
+`support_manager` or `platform_admin`.
+
+If no authenticated scraper is configured, use Cloud Run built-in metrics,
+structured logs, and Cloud Logging-based metrics for operational dashboards
+until a token-capable scraper is available. Do not make `/metrics` public to
+work around scraper limitations.
 
 ## Distributed Tracing
 

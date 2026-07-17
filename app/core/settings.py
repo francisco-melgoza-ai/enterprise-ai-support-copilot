@@ -37,6 +37,9 @@ DEFAULT_RAG_CIRCUIT_FAILURE_THRESHOLD = 5
 DEFAULT_RAG_CIRCUIT_RECOVERY_SECONDS = 30.0
 DEFAULT_RAG_CIRCUIT_HALF_OPEN_MAX_CALLS = 1
 DEFAULT_RAG_GRACEFUL_DEGRADATION_ENABLED = True
+DEFAULT_AUTH_PROVIDER = "mock"
+DEFAULT_AUTH_MOCK_ALLOW_IN_PRODUCTION = False
+SUPPORTED_AUTH_PROVIDERS = {"mock", "google"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,9 @@ class TicketAnalysisSettings:
     gemini_resilience: ResiliencePolicy
     rag_resilience: ResiliencePolicy
     rag_graceful_degradation_enabled: bool
+    auth_provider: str
+    auth_google_audience: str | None
+    auth_mock_allow_in_production: bool
 
     @classmethod
     def from_env(
@@ -116,6 +122,12 @@ class TicketAnalysisSettings:
                 "RAG_GRACEFUL_DEGRADATION_ENABLED",
                 DEFAULT_RAG_GRACEFUL_DEGRADATION_ENABLED,
             ),
+            auth_provider=_auth_provider_env(),
+            auth_google_audience=_optional_env("AUTH_GOOGLE_AUDIENCE"),
+            auth_mock_allow_in_production=_bool_env(
+                "AUTH_MOCK_ALLOW_IN_PRODUCTION",
+                DEFAULT_AUTH_MOCK_ALLOW_IN_PRODUCTION,
+            ),
         )
 
 
@@ -146,6 +158,14 @@ def _bool_env(name: str, default: bool) -> bool:
     if value is None or not value.strip():
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auth_provider_env() -> str:
+    provider = os.getenv("AUTH_PROVIDER", DEFAULT_AUTH_PROVIDER).strip().lower()
+    normalized = provider or DEFAULT_AUTH_PROVIDER
+    if normalized not in SUPPORTED_AUTH_PROVIDERS:
+        raise ValueError("AUTH_PROVIDER must be one of: mock, google.")
+    return normalized
 
 
 def _resilience_policy_from_env(

@@ -8,7 +8,10 @@ from fastapi.testclient import TestClient
 from google.genai import types
 from opentelemetry.trace import StatusCode
 
+from app.api.dependencies.auth import get_authentication_provider
 from app.api.dependencies.services import get_ticket_analysis_service
+from app.core.auth import MockAuthenticationProvider
+from app.core.settings import TicketAnalysisSettings
 from app.core.tracing import (
     TracingSettings,
     clear_finished_spans,
@@ -31,6 +34,7 @@ def clear_spans() -> None:
     clear_finished_spans()
     yield
     app.dependency_overrides.clear()
+    get_authentication_provider.cache_clear()
     get_ticket_analysis_service.cache_clear()
     clear_finished_spans()
 
@@ -58,13 +62,18 @@ def test_request_and_ticket_analysis_spans_are_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TICKET_ANALYSIS_PROVIDER", "mock")
+    monkeypatch.setenv("AUTH_PROVIDER", "mock")
+    get_authentication_provider.cache_clear()
     get_ticket_analysis_service.cache_clear()
     client = TestClient(app)
 
     response = client.post(
         "/api/v1/tickets/analyze",
         json=_ticket_payload(),
-        headers={"X-Request-ID": "trace-request-id"},
+        headers={
+            "Authorization": "Bearer mock:agent-123:support_agent",
+            "X-Request-ID": "trace-request-id",
+        },
     )
 
     spans = get_finished_spans()
@@ -108,6 +117,22 @@ async def test_custom_provider_span_is_created() -> None:
     assert span.attributes["ai.model"] == "gemini-2.5-flash"
     assert span.attributes["ai.outcome"] == "success"
     assert span.attributes["retry.attempt_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_authentication_span_is_created() -> None:
+    provider = MockAuthenticationProvider(settings=TicketAnalysisSettings.from_env())
+
+    await provider.authenticate("mock:agent-123:support_agent")
+
+    span = _span_named(get_finished_spans(), "auth.authenticate")
+    assert span is not None
+    assert span.attributes["auth.provider"] == "mock"
+    assert span.attributes["auth.outcome"] == "success"
+    assert span.attributes["auth.role_count"] == 1
+    serialized_attributes = " ".join(str(value) for value in span.attributes.values())
+    assert "agent-123" not in serialized_attributes
+    assert "mock:agent-123:support_agent" not in serialized_attributes
 
 
 @pytest.mark.anyio

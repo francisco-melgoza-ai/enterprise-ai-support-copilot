@@ -7,8 +7,9 @@
 
 Enterprise AI Support Copilot is a production-oriented customer support ticket
 analysis API built with FastAPI, Gemini 2.5 Flash, Vertex AI, Vertex AI RAG
-Engine (Serverless), Cloud Run, structured logging, request correlation, and a
-deterministic local mock provider for development.
+Engine (Serverless), Cloud Run, role-based API authorization, structured
+logging, request correlation, and a deterministic local mock provider for
+development.
 
 The service analyzes support tickets and returns a structured JSON response with
 summary, category, priority, sentiment, escalation guidance, a suggested support
@@ -17,8 +18,7 @@ Gemini generation through Vertex AI, and managed knowledge grounding through
 Vertex AI RAG Engine.
 
 This module intentionally does not implement BigQuery analytics, Terraform,
-application authentication, agents, a frontend, or an automated knowledge
-ingestion pipeline yet.
+agents, a frontend, or an automated knowledge ingestion pipeline yet.
 
 ## Architecture
 
@@ -66,6 +66,8 @@ unchanged because they are already higher-is-better lexical relevance scores.
 - Pydantic request and response validation
 - Async service boundaries
 - FastAPI dependency injection
+- Mock and Google OIDC authentication providers
+- Role-based authorization for ticket analysis and metrics
 - Request correlation with `X-Request-ID`
 - Structured application logging
 - Unit and integration tests
@@ -175,6 +177,12 @@ Runtime environment variables:
 - `RAG_DISTANCE_THRESHOLD`: optional, defaults to `0.5`.
 - `LOCAL_RETRIEVAL_MIN_SCORE`: optional, defaults to `0.22`; controls the
   minimum lexical relevance score for local retrieval.
+- `AUTH_PROVIDER`: `mock` or `google`; defaults to `mock`.
+- `AUTH_GOOGLE_AUDIENCE`: required when `AUTH_PROVIDER=google`; set this to the
+  expected Google-issued OIDC token audience.
+- `AUTH_MOCK_ALLOW_IN_PRODUCTION`: defaults to `false`; only set to `true` for
+  tightly controlled break-glass testing because mock auth is not a production
+  identity boundary.
 
 Do not commit credentials, API keys, service account keys, or
 project-specific secrets.
@@ -192,6 +200,7 @@ Analyze a ticket:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/tickets/analyze \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer mock:agent-123:support_agent" \
   -H "X-Request-ID: demo-request-001" \
   -d '{
     "ticket_id": "TICKET-123",
@@ -199,6 +208,13 @@ curl -X POST http://127.0.0.1:8000/api/v1/tickets/analyze \
     "description": "Invoice payment failed and the customer is frustrated.",
     "channel": "email"
   }'
+```
+
+Read metrics as a manager:
+
+```bash
+curl http://127.0.0.1:8000/metrics \
+  -H "Authorization: Bearer mock:manager-456:support_manager"
 ```
 
 Request fields:
@@ -209,13 +225,71 @@ Request fields:
 - `channel`: one of `web`, `email`, `chat`, or `phone`
 - `customer_language`: optional, defaults to `en`
 
+## Authentication And Authorization
+
+The API uses a provider abstraction that normalizes authenticated callers into a
+principal with `subject`, optional `email`, roles, and provider name. The
+supported roles are:
+
+- `support_agent`
+- `support_manager`
+- `platform_admin`
+
+Authorization rules:
+
+- `POST /api/v1/tickets/analyze`: `support_agent`, `support_manager`, or
+  `platform_admin`.
+- `GET /metrics`: `support_manager` or `platform_admin`.
+- `GET /health` and `GET /ready`: public.
+
+Local mock authentication is deterministic and intended only for local
+development and automated tests:
+
+```text
+Authorization: Bearer mock:<subject>:<role1,role2>
+```
+
+Examples:
+
+```bash
+mock:agent-123:support_agent
+mock:manager-456:support_manager
+mock:admin-789:platform_admin
+```
+
+Mock authentication is blocked when `APP_ENV=production` unless
+`AUTH_MOCK_ALLOW_IN_PRODUCTION=true`. Enabling that override bypasses the
+production identity boundary and should not be used for normal deployments.
+
+Production Google mode validates Google-issued OIDC identity tokens with the
+official Google authentication library. The verifier checks the token signature,
+issuer, audience, expiration, and subject. The expected audience comes from
+`AUTH_GOOGLE_AUDIENCE`; do not manually decode JWTs or trust unsigned claims.
+
+Cloud Run invocation example with an identity token:
+
+```bash
+SERVICE_URL="https://YOUR-CLOUD-RUN-URL"
+TOKEN="$(gcloud auth print-identity-token --audiences="${SERVICE_URL}")"
+
+curl -X POST "${SERVICE_URL}/api/v1/tickets/analyze" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_id":"TICKET-123","subject":"Payment failed","description":"Invoice payment failed.","channel":"email"}'
+```
+
+Enterprise identity-provider migration path: keep the FastAPI authorization
+dependencies and add another `AuthenticationProvider` implementation that
+validates the enterprise IdP token, maps approved groups to the same normalized
+roles, and preserves the same principal contract.
+
 ## Observability
 
 The API emits structured JSON logs and Prometheus-compatible metrics for
-request handling, startup configuration, knowledge retrieval, and Gemini
-ticket-analysis operations. Operational targets, SLI definitions, and Google
-Cloud Monitoring setup instructions are documented in
-[docs/operations.md](docs/operations.md).
+request handling, authentication, authorization, startup configuration,
+knowledge retrieval, and Gemini ticket-analysis operations. Operational
+targets, SLI definitions, and Google Cloud Monitoring setup instructions are
+documented in [docs/operations.md](docs/operations.md).
 
 Every request receives a correlation ID:
 
@@ -271,8 +345,9 @@ Safe Gemini telemetry example:
 ```
 
 Logs must not include raw ticket IDs, ticket subjects, ticket descriptions,
-retrieved text, generated model content, credentials, or PII. Use `request_id`
-as the primary trace identifier.
+bearer tokens, raw JWTs, authorization headers, full identity claims, retrieved
+text, generated model content, credentials, or PII. Use `request_id` as the
+primary trace identifier.
 
 Runtime observability endpoints:
 
@@ -280,14 +355,16 @@ Runtime observability endpoints:
   verification.
 - `GET /ready`: lightweight readiness endpoint that validates configured
   provider names without calling Gemini, Vertex AI, or Vertex AI RAG Engine.
-- `GET /metrics`: Prometheus-compatible application metrics.
+- `GET /metrics`: Prometheus-compatible application metrics. Requires
+  `support_manager` or `platform_admin`.
 
 Local verification:
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8000/ready
-curl http://localhost:8000/metrics
+curl http://localhost:8000/metrics \
+  -H "Authorization: Bearer mock:manager-456:support_manager"
 ```
 
 Metrics use the `support_copilot_` prefix and avoid high-cardinality or
@@ -653,11 +730,15 @@ Repository variables required by CD:
 - `GEMINI_MODEL`: model name, for example `gemini-2.5-flash`.
 - `RAG_CORPUS_RESOURCE_NAME`: managed RAG corpus resource name.
 - `RAG_LOCATION`: RAG corpus location.
+- `AUTH_PROVIDER`: production authentication provider; CD requires `google`.
+- `AUTH_GOOGLE_AUDIENCE`: expected audience for Google-issued identity tokens,
+  usually the Cloud Run service URL.
+- `AUTH_MOCK_ALLOW_IN_PRODUCTION`: deployed as `false` by CD.
 
 The workflow validates these variables before deployment and fails if any are
-blank. It uses `--update-env-vars` so existing Cloud Run environment variables
-outside this list are preserved, and it does not overwrite configured values
-with empty strings.
+blank. Production CD fails unless `AUTH_PROVIDER=google` and
+`AUTH_GOOGLE_AUDIENCE` is set. The workflow uses `--update-env-vars` so
+existing Cloud Run environment variables outside this list are preserved.
 
 No GitHub secrets are required for authentication. Use repository secrets only
 for future application environment values that truly must remain private. Do

@@ -115,6 +115,18 @@ RETRY_DELAY = Histogram(
     ("component", "reason"),
     registry=REGISTRY,
 )
+AUTHENTICATION_REQUESTS = Counter(
+    "support_copilot_authentication_requests_total",
+    "Authentication attempts by provider and outcome.",
+    ("provider", "outcome"),
+    registry=REGISTRY,
+)
+AUTHORIZATION_REQUESTS = Counter(
+    "support_copilot_authorization_requests_total",
+    "Authorization checks by outcome.",
+    ("outcome",),
+    registry=REGISTRY,
+)
 
 
 def record_http_request(
@@ -209,3 +221,11 @@ def record_circuit_rejection(*, component: str) -> None:
 
 def record_degraded_operation(*, component: str, reason: str) -> None:
     DEGRADED_OPERATIONS.labels(component=component, reason=reason).inc()
+
+
+def record_authentication_request(*, provider: str, outcome: str) -> None:
+    AUTHENTICATION_REQUESTS.labels(provider=provider, outcome=outcome).inc()
+
+
+def record_authorization_request(*, outcome: str) -> None:
+    AUTHORIZATION_REQUESTS.labels(outcome=outcome).inc()

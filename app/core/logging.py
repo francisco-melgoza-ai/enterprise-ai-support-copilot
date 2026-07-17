@@ -52,6 +52,9 @@ class JsonFormatter(logging.Formatter):
             "retrieved_chunk_count",
             "app_env",
             "cloud_region",
+            "auth_provider",
+            "roles",
+            "authorization_outcome",
         ):
             value = getattr(record, key, None)
             if value is not None:

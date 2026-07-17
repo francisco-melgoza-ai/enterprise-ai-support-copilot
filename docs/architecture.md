@@ -7,6 +7,10 @@ Cloud Run
 ↓
 FastAPI
 ↓
+AuthenticationProvider
+↓
+Role authorization
+↓
 Dependency Injection
 ↓
 TicketAnalysisService
@@ -37,6 +41,27 @@ FastAPI exposes:
 
 Routes handle HTTP concerns, request validation, response serialization, and
 error translation. They do not contain ticket-analysis business logic.
+
+`/health` and `/ready` are public. `/api/v1/tickets/analyze` requires one of
+`support_agent`, `support_manager`, or `platform_admin`. `/metrics` requires
+`support_manager` or `platform_admin`.
+
+### AuthenticationProvider
+
+Authentication is isolated behind a provider protocol that returns a normalized
+principal with subject, optional email, roles, and provider name.
+
+Providers:
+
+- `AUTH_PROVIDER=mock`: deterministic local/test provider accepting
+  `mock:<subject>:<role1,role2>` bearer tokens. It is blocked in production
+  unless `AUTH_MOCK_ALLOW_IN_PRODUCTION=true`.
+- `AUTH_PROVIDER=google`: verifies Google-issued OIDC identity tokens with the
+  official Google authentication library and the configured
+  `AUTH_GOOGLE_AUDIENCE`.
+
+The API never trusts manually decoded JWT claims without signature
+verification.
 
 ### Dependency Injection
 
@@ -112,18 +137,21 @@ public response contract includes:
 
 1. A client sends `POST /api/v1/tickets/analyze`.
 2. Request middleware accepts or generates `X-Request-ID`.
-3. FastAPI validates the request body with Pydantic.
-4. Dependency injection resolves the configured `TicketAnalysisService`.
-5. In mock mode, the mock service returns deterministic analysis.
-6. In Gemini mode, the service optionally calls the configured
+3. The authentication dependency validates the bearer token and normalizes the
+   principal.
+4. The authorization dependency checks the required support role.
+5. FastAPI validates the request body with Pydantic.
+6. Dependency injection resolves the configured `TicketAnalysisService`.
+7. In mock mode, the mock service returns deterministic analysis.
+8. In Gemini mode, the service optionally calls the configured
    `KnowledgeRetriever`.
-7. With `KNOWLEDGE_PROVIDER=vertex_rag`, the retriever calls Vertex AI RAG
+9. With `KNOWLEDGE_PROVIDER=vertex_rag`, the retriever calls Vertex AI RAG
    Engine and maps contexts into retrieved passages.
-8. Retrieved passages are inserted into the Gemini prompt as untrusted support
+10. Retrieved passages are inserted into the Gemini prompt as untrusted support
    knowledge.
-9. Gemini 2.5 Flash returns structured output.
-10. Pydantic validates the model output.
-11. The API returns the structured JSON response with `X-Request-ID`.
+11. Gemini 2.5 Flash returns structured output.
+12. Pydantic validates the model output.
+13. The API returns the structured JSON response with `X-Request-ID`.
 
 ## Resilience Flow
 
@@ -393,6 +421,7 @@ adds custom spans for ticket analysis, retrieval, and Gemini generation.
 Custom spans use safe, low-cardinality attributes:
 
 - `ticket.analysis`: category, priority, escalation flag.
+- `auth.authenticate`: provider, outcome, role count.
 - `knowledge.retrieve`: provider, outcome, retrieved chunk count.
 - `provider.generate`: provider, model, outcome, retry attempt count.
 
@@ -408,9 +437,15 @@ prompts, generated content, retrieved document content, credentials, or PII.
 - Uses Application Default Credentials for Vertex AI and RAG Engine access.
 - Uses IAM service accounts in Cloud Run.
 - Does not use API keys for Gemini or Vertex RAG.
+- Validates Google OIDC tokens with signature, issuer, audience, expiration,
+  and subject checks through the official Google authentication library.
+- Uses normalized roles for authorization:
+  `support_agent`, `support_manager`, and `platform_admin`.
+- Blocks mock authentication in production unless explicitly overridden.
 - Does not store credential JSON files in the repository.
-- Does not log ticket subject, ticket description, raw ticket ID, retrieved
-  content, generated model content, credentials, or PII.
+- Does not log bearer tokens, raw JWTs, authorization headers, full identity
+  claims, ticket subject, ticket description, raw ticket ID, retrieved content,
+  generated model content, credentials, or PII.
 - Follows least-privilege IAM guidance for runtime and provisioning identities.
 
 ## Testing
