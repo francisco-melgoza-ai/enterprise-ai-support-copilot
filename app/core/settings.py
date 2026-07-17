@@ -40,6 +40,9 @@ DEFAULT_RAG_GRACEFUL_DEGRADATION_ENABLED = True
 DEFAULT_AUTH_PROVIDER = "mock"
 DEFAULT_AUTH_MOCK_ALLOW_IN_PRODUCTION = False
 SUPPORTED_AUTH_PROVIDERS = {"mock", "google"}
+DEFAULT_CONVERSATION_TTL_SECONDS = 86_400
+DEFAULT_CONVERSATION_SUMMARY_THRESHOLD = 12
+DEFAULT_CONVERSATION_MAX_RECENT_MESSAGES = 6
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,9 @@ class TicketAnalysisSettings:
     auth_provider: str
     auth_google_audience: str | None
     auth_mock_allow_in_production: bool
+    conversation_ttl_seconds: int
+    conversation_summary_threshold: int
+    conversation_max_recent_messages: int
 
     @classmethod
     def from_env(
@@ -67,7 +73,7 @@ class TicketAnalysisSettings:
     ) -> "TicketAnalysisSettings":
         load_dotenv(dotenv_path=dotenv_path, override=False)
 
-        return cls(
+        settings = cls(
             app_env=os.getenv("APP_ENV", DEFAULT_APP_ENV).strip() or DEFAULT_APP_ENV,
             provider=os.getenv(
                 "TICKET_ANALYSIS_PROVIDER", DEFAULT_TICKET_ANALYSIS_PROVIDER
@@ -128,7 +134,28 @@ class TicketAnalysisSettings:
                 "AUTH_MOCK_ALLOW_IN_PRODUCTION",
                 DEFAULT_AUTH_MOCK_ALLOW_IN_PRODUCTION,
             ),
+            conversation_ttl_seconds=_positive_int_env(
+                "CONVERSATION_TTL_SECONDS",
+                DEFAULT_CONVERSATION_TTL_SECONDS,
+            ),
+            conversation_summary_threshold=_positive_int_env(
+                "CONVERSATION_SUMMARY_THRESHOLD",
+                DEFAULT_CONVERSATION_SUMMARY_THRESHOLD,
+            ),
+            conversation_max_recent_messages=_positive_int_env(
+                "CONVERSATION_MAX_RECENT_MESSAGES",
+                DEFAULT_CONVERSATION_MAX_RECENT_MESSAGES,
+            ),
         )
+        settings.validate()
+        return settings
+
+    def validate(self) -> None:
+        if self.conversation_summary_threshold <= self.conversation_max_recent_messages:
+            raise ValueError(
+                "CONVERSATION_SUMMARY_THRESHOLD must be greater than "
+                "CONVERSATION_MAX_RECENT_MESSAGES."
+            )
 
 
 def _optional_env(name: str) -> str | None:
@@ -144,6 +171,13 @@ def _int_env(name: str, default: int) -> int:
     if value is None or not value.strip():
         return default
     return int(value.strip())
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = _int_env(name, default)
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero.")
+    return value
 
 
 def _float_env(name: str, default: float) -> float:

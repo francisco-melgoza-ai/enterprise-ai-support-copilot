@@ -1,10 +1,16 @@
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.core.resilience import CircuitBreaker, CircuitBreakerConfig
+from app.schemas.conversations import (
+    ConversationMemoryContext,
+    ConversationMessage,
+    ConversationRole,
+)
 from app.schemas.retrieval import RetrievedPassage
 from app.schemas.tickets import TicketAnalysisRequest
 from app.services.knowledge import VertexRagKnowledgeRetriever
@@ -262,6 +268,31 @@ async def test_gemini_prompt_includes_grounded_retrieved_passages() -> None:
 
 
 @pytest.mark.anyio
+async def test_gemini_prompt_includes_conversation_memory() -> None:
+    client = FakeGeminiModelClient([_valid_response()])
+    service = _service(client)
+    memory_context = ConversationMemoryContext(
+        summary="Customer previously asked about invoice retries.",
+        recent_messages=[
+            ConversationMessage(
+                message_id="message-1",
+                conversation_id="conversation-1",
+                role=ConversationRole.USER,
+                content="I tried paying yesterday.",
+                created_at=_ticket_created_at(),
+            )
+        ],
+    )
+
+    await service.analyze(_ticket(), memory_context)
+
+    request = client.requests[0]
+    assert "## Conversation Memory" in request["contents"]
+    assert "Customer previously asked about invoice retries." in request["contents"]
+    assert "I tried paying yesterday." in request["contents"]
+
+
+@pytest.mark.anyio
 async def test_gemini_prompt_requires_no_knowledge_disclosure() -> None:
     client = FakeGeminiModelClient([_valid_response()])
     retriever = FakeKnowledgeRetriever([])
@@ -363,6 +394,10 @@ def _valid_response() -> SimpleNamespace:
             "confidence": 0.89,
         }
     )
+
+
+def _ticket_created_at() -> datetime:
+    return datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _normalized(text: str) -> str:

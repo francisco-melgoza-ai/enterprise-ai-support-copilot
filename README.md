@@ -13,9 +13,10 @@ development.
 
 The service analyzes support tickets and returns a structured JSON response with
 summary, category, priority, sentiment, escalation guidance, a suggested support
-reply, and confidence. It supports local-only development with no cloud calls,
-Gemini generation through Vertex AI, and managed knowledge grounding through
-Vertex AI RAG Engine.
+reply, and confidence. It also supports authenticated conversation sessions so
+future analysis can use a rolling summary and recent support turns. It supports
+local-only development with no cloud calls, Gemini generation through Vertex AI,
+and managed knowledge grounding through Vertex AI RAG Engine.
 
 This module intentionally does not implement BigQuery analytics, Terraform,
 agents, a frontend, or an automated knowledge ingestion pipeline yet.
@@ -26,6 +27,8 @@ agents, a frontend, or an automated knowledge ingestion pipeline yet.
 API
 ↓
 Service
+↓
+Conversation Memory
 ↓
 KnowledgeRetriever
 ↓
@@ -41,6 +44,9 @@ Structured JSON Response
   analysis work to the service layer.
 - **Service**: `TicketAnalysisService` is an async interface. The mock and
   Gemini implementations share the same request and response contract.
+- **Conversation Memory**: `ConversationService` manages session ownership,
+  messages, expiration, summaries, and recent-turn context without coupling API
+  routes to storage.
 - **KnowledgeRetriever**: Optional async retrieval boundary. It can be disabled,
   use local synthetic Markdown/text files, or call Vertex AI RAG Engine.
 - **Vertex AI RAG Engine**: Managed retrieval provider for approved support
@@ -68,6 +74,8 @@ unchanged because they are already higher-is-better lexical relevance scores.
 - FastAPI dependency injection
 - Mock and Google OIDC authentication providers
 - Role-based authorization for ticket analysis and metrics
+- Conversation sessions with owner checks and admin override
+- Rolling conversation summaries and recent-message memory context
 - Request correlation with `X-Request-ID`
 - Structured application logging
 - Unit and integration tests
@@ -183,6 +191,10 @@ Runtime environment variables:
 - `AUTH_MOCK_ALLOW_IN_PRODUCTION`: defaults to `false`; only set to `true` for
   tightly controlled break-glass testing because mock auth is not a production
   identity boundary.
+- `CONVERSATION_TTL_SECONDS`: optional, defaults to `86400`.
+- `CONVERSATION_SUMMARY_THRESHOLD`: optional, defaults to `12` messages.
+- `CONVERSATION_MAX_RECENT_MESSAGES`: optional, defaults to `6`.
+  `CONVERSATION_SUMMARY_THRESHOLD` must be greater than this value.
 
 Do not commit credentials, API keys, service account keys, or
 project-specific secrets.
@@ -193,6 +205,24 @@ Health check:
 
 ```bash
 curl http://127.0.0.1:8000/health
+```
+
+Create a conversation:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/conversations \
+  -H "Authorization: Bearer mock:agent-123:support_agent" \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"channel":"web"}}'
+```
+
+Append a conversation message:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/conversations/CONVERSATION_ID/messages \
+  -H "Authorization: Bearer mock:agent-123:support_agent" \
+  -H "Content-Type: application/json" \
+  -d '{"role":"user","content":"I tried paying yesterday and still need help."}'
 ```
 
 Analyze a ticket:
@@ -206,7 +236,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/tickets/analyze \
     "ticket_id": "TICKET-123",
     "subject": "Payment failed",
     "description": "Invoice payment failed and the customer is frustrated.",
-    "channel": "email"
+    "channel": "email",
+    "conversation_id": "CONVERSATION_ID"
   }'
 ```
 
@@ -224,6 +255,30 @@ Request fields:
 - `description`: non-empty string, maximum 5000 characters
 - `channel`: one of `web`, `email`, `chat`, or `phone`
 - `customer_language`: optional, defaults to `en`
+- `conversation_id`: optional; when supplied, the service validates ownership,
+  includes rolling memory in Gemini prompts, and appends user/assistant turns.
+
+Conversation endpoints:
+
+- `POST /api/v1/conversations`
+- `GET /api/v1/conversations/{conversation_id}`
+- `GET /api/v1/conversations/{conversation_id}/messages`
+- `POST /api/v1/conversations/{conversation_id}/messages`
+- `DELETE /api/v1/conversations/{conversation_id}`
+
+`GET /api/v1/conversations/{conversation_id}/messages` accepts an optional
+`limit` query parameter from `1` through `100` and defaults to `50`.
+`DELETE` returns `204 No Content` after deleting an existing conversation.
+
+Conversation owner rules:
+
+- Conversation owner must match the authenticated subject.
+- `platform_admin` may access any conversation.
+- `support_manager` does not receive owner override automatically.
+- Cross-owner access is returned as `404` so callers cannot infer whether
+  another user's conversation exists.
+- Only `platform_admin` may append `system` messages.
+- Message content is never logged or used as a metric label.
 
 ## Authentication And Authorization
 
@@ -283,13 +338,40 @@ dependencies and add another `AuthenticationProvider` implementation that
 validates the enterprise IdP token, maps approved groups to the same normalized
 roles, and preserves the same principal contract.
 
+## Conversation Memory
+
+Conversation memory is local and in-memory in this milestone. It is designed
+behind a `ConversationRepository` interface so the storage backend can later be
+replaced by Firestore, AlloyDB, Memorystore, or another approved managed store
+without changing API route logic.
+
+The current repository is not durable, not multi-instance safe, and not suitable
+for production Cloud Run scale-out. Production conversation continuity requires
+a durable repository implementation such as Firestore or Cloud SQL and the same
+service-layer ownership checks.
+
+Lifecycle:
+
+- Conversations expire after `CONVERSATION_TTL_SECONDS`.
+- Messages are appended with immutable IDs, roles, content, and timestamps.
+- When `CONVERSATION_SUMMARY_THRESHOLD` is exceeded, older messages are
+  summarized and only `CONVERSATION_MAX_RECENT_MESSAGES` are retained.
+- If summarization fails, the service keeps the unsummarized message history
+  rather than deleting or corrupting the conversation.
+- Gemini ticket analysis receives rolling summary, recent messages, retrieved
+  RAG passages, and the current ticket request.
+
+Summarization uses a deterministic mock summarizer in local/test mode. The
+`MemoryManager` is the boundary for adding Gemini summarization later while
+preserving the same conversation contract.
+
 ## Observability
 
 The API emits structured JSON logs and Prometheus-compatible metrics for
 request handling, authentication, authorization, startup configuration,
-knowledge retrieval, and Gemini ticket-analysis operations. Operational
-targets, SLI definitions, and Google Cloud Monitoring setup instructions are
-documented in [docs/operations.md](docs/operations.md).
+conversation lifecycle, knowledge retrieval, and Gemini ticket-analysis
+operations. Operational targets, SLI definitions, and Google Cloud Monitoring
+setup instructions are documented in [docs/operations.md](docs/operations.md).
 
 Every request receives a correlation ID:
 

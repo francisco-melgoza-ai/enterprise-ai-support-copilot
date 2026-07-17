@@ -55,6 +55,7 @@ class JsonFormatter(logging.Formatter):
             "auth_provider",
             "roles",
             "authorization_outcome",
+            "message_count",
         ):
             value = getattr(record, key, None)
             if value is not None:

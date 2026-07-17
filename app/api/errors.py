@@ -5,6 +5,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.auth import AuthenticationError, AuthorizationError
+from app.services.conversations import (
+    ConversationAccessDeniedError,
+    ConversationNotFoundError,
+)
 from app.services.ticket_analysis import TicketAnalysisServiceError
 
 
@@ -56,6 +60,34 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AuthorizationError)
     async def authorization_exception_handler(
         request: Request, exc: AuthorizationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "authorization_failed",
+                    "message": "Insufficient permissions.",
+                }
+            },
+        )
+
+    @app.exception_handler(ConversationNotFoundError)
+    async def conversation_not_found_handler(
+        request: Request, exc: ConversationNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "code": "conversation_not_found",
+                    "message": "Conversation was not found.",
+                }
+            },
+        )
+
+    @app.exception_handler(ConversationAccessDeniedError)
+    async def conversation_access_denied_handler(
+        request: Request, exc: ConversationAccessDeniedError
     ) -> JSONResponse:
         return JSONResponse(
             status_code=403,

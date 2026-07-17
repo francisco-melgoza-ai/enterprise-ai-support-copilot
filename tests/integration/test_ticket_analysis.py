@@ -295,7 +295,7 @@ def test_analyze_ticket_rejects_unsupported_channel() -> None:
 def test_analyze_ticket_returns_503_for_service_failure() -> None:
     class FailingTicketAnalysisService:
         async def analyze(
-            self, ticket: TicketAnalysisRequest
+            self, ticket: TicketAnalysisRequest, memory_context: object | None = None
         ) -> TicketAnalysisResponse:
             raise TicketAnalysisProviderError("provider failed")
 
