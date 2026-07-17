@@ -211,8 +211,11 @@ Request fields:
 
 ## Observability
 
-The API emits structured JSON logs for request handling, startup configuration,
-knowledge retrieval, and Gemini ticket-analysis operations.
+The API emits structured JSON logs and Prometheus-compatible metrics for
+request handling, startup configuration, knowledge retrieval, and Gemini
+ticket-analysis operations. Operational targets, SLI definitions, and Google
+Cloud Monitoring setup instructions are documented in
+[docs/operations.md](docs/operations.md).
 
 Every request receives a correlation ID:
 
@@ -270,6 +273,36 @@ Safe Gemini telemetry example:
 Logs must not include raw ticket IDs, ticket subjects, ticket descriptions,
 retrieved text, generated model content, credentials, or PII. Use `request_id`
 as the primary trace identifier.
+
+Runtime observability endpoints:
+
+- `GET /health`: liveness endpoint used by uptime checks and Cloud Run health
+  verification.
+- `GET /ready`: lightweight readiness endpoint that validates configured
+  provider names without calling Gemini, Vertex AI, or Vertex AI RAG Engine.
+- `GET /metrics`: Prometheus-compatible application metrics.
+
+Local verification:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
+curl http://localhost:8000/metrics
+```
+
+Metrics use the `support_copilot_` prefix and avoid high-cardinality or
+sensitive labels. They do not include request IDs, ticket IDs, ticket text,
+prompts, retrieved document content, generated responses, credentials, or PII.
+
+Initial portfolio/demo SLOs:
+
+- Availability: `99.5%` successful requests over 30 days.
+- Latency: `95%` of `/api/v1/tickets/analyze` requests complete within
+  45 seconds.
+- Server-side error rate: less than `1%` over 30 days.
+- Health checks: `99.9%` successful `/health` responses.
+
+These targets should be adjusted using real production traffic.
 
 ## Deployment
 

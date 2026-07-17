@@ -1,0 +1,304 @@
+# Operations Guide
+
+## Service Objectives
+
+These are initial portfolio/demo targets. They should be adjusted after the
+service has enough real production traffic to establish realistic baselines.
+
+| Objective | Initial target |
+| --- | ---: |
+| Availability SLO | 99.5% successful requests over 30 days |
+| Latency SLO | 95% of `/api/v1/tickets/analyze` requests complete within 45 seconds |
+| Error-rate objective | Less than 1% server-side failures over 30 days |
+| Health-check objective | 99.9% successful `/health` responses |
+
+## Service-Level Indicators
+
+### Availability
+
+Numerator: count of Cloud Run HTTP requests with response code class `2xx`,
+`3xx`, or `4xx`.
+
+Denominator: count of all Cloud Run HTTP requests.
+
+4xx responses are included as successful service availability because the
+service was reachable and returned a client-error response. 5xx responses are
+counted as unavailable.
+
+### Request Latency
+
+Numerator: count of `/api/v1/tickets/analyze` requests completed within
+45 seconds.
+
+Denominator: count of all `/api/v1/tickets/analyze` requests.
+
+Track p95 latency using Cloud Run request latency and the application metric
+`support_copilot_http_request_duration_seconds` when Prometheus collection is
+enabled.
+
+### Provider Failure Rate
+
+Numerator: Gemini provider requests with outcome `timeout`, `invalid_response`,
+or `error`.
+
+Denominator: all Gemini provider requests.
+
+Application metric:
+
+```text
+support_copilot_provider_failures_total / support_copilot_provider_requests_total
+```
+
+### Retrieval Failure Rate
+
+Numerator: knowledge retrieval requests with outcome `timeout` or `error`.
+
+Denominator: all knowledge retrieval requests, including `success` and
+`no_results`.
+
+Application metric:
+
+```text
+support_copilot_retrieval_failures_total / support_copilot_retrieval_requests_total
+```
+
+### Health-Check Availability
+
+Numerator: successful `/health` uptime checks returning HTTP `200`.
+
+Denominator: all `/health` uptime checks.
+
+## Runtime Endpoints
+
+- `/health`: minimal liveness endpoint for Cloud Run and external uptime checks.
+- `/ready`: lightweight application readiness check. It validates configured
+  provider names and does not call Gemini, Vertex AI, or Vertex AI RAG Engine.
+- `/metrics`: Prometheus-compatible application metrics. Metrics intentionally
+  exclude ticket text, prompts, generated responses, retrieved content,
+  credentials, and request IDs.
+
+Local verification:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
+curl http://localhost:8000/metrics
+```
+
+## Google Cloud Monitoring Setup
+
+The following commands are one-time setup examples. Review them for your
+project and run them from an administrator workstation. Do not run these from
+the application or CD workflow.
+
+Set common values:
+
+```bash
+export PROJECT_ID="your-project-id"
+export REGION="us-central1"
+export SERVICE_NAME="enterprise-ai-support-copilot"
+export SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --format 'value(status.url)')"
+export SERVICE_HOST="${SERVICE_URL#https://}"
+export NOTIFICATION_CHANNEL="projects/${PROJECT_ID}/notificationChannels/CHANNEL_ID"
+```
+
+Enable Cloud Monitoring API if needed:
+
+```bash
+gcloud services enable monitoring.googleapis.com \
+  --project "$PROJECT_ID"
+```
+
+### Notification Channel Placeholder
+
+Create a notification channel in the Google Cloud console:
+
+1. Go to **Monitoring** → **Alerting** → **Edit notification channels**.
+2. Add an email, Pub/Sub, Slack, PagerDuty, or webhook channel.
+3. Copy the created resource name, such as
+   `projects/PROJECT_ID/notificationChannels/CHANNEL_ID`.
+4. Store it in `NOTIFICATION_CHANNEL` for the alert policy commands.
+
+### Uptime Check For `/health`
+
+```bash
+gcloud monitoring uptime create "Support Copilot health" \
+  --project "$PROJECT_ID" \
+  --resource-type "uptime-url" \
+  --resource-labels "host=${SERVICE_HOST},project_id=${PROJECT_ID}" \
+  --path "/health" \
+  --protocol "HTTPS" \
+  --request-method "GET" \
+  --status-codes "200" \
+  --period "60s" \
+  --timeout "10s"
+```
+
+### Alert For Cloud Run 5xx Responses
+
+Create `monitoring-cloud-run-5xx.json`:
+
+```json
+{
+  "displayName": "Support Copilot Cloud Run 5xx responses",
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": ["NOTIFICATION_CHANNEL_PLACEHOLDER"],
+  "conditions": [
+    {
+      "displayName": "5xx response rate",
+      "conditionThreshold": {
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.label.service_name=\"enterprise-ai-support-copilot\" AND metric.type=\"run.googleapis.com/request_count\" AND metric.label.response_code_class=\"5xx\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_RATE",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.service_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.01,
+        "duration": "300s",
+        "trigger": {"count": 1}
+      }
+    }
+  ]
+}
+```
+
+Create the policy:
+
+```bash
+sed "s|NOTIFICATION_CHANNEL_PLACEHOLDER|${NOTIFICATION_CHANNEL}|g" \
+  monitoring-cloud-run-5xx.json > /tmp/monitoring-cloud-run-5xx.json
+
+gcloud monitoring policies create \
+  --project "$PROJECT_ID" \
+  --policy-from-file "/tmp/monitoring-cloud-run-5xx.json"
+```
+
+### Alert For High p95 Request Latency
+
+Create `monitoring-cloud-run-p95-latency.json`:
+
+```json
+{
+  "displayName": "Support Copilot high p95 request latency",
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": ["NOTIFICATION_CHANNEL_PLACEHOLDER"],
+  "conditions": [
+    {
+      "displayName": "p95 request latency above 45 seconds",
+      "conditionThreshold": {
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.label.service_name=\"enterprise-ai-support-copilot\" AND metric.type=\"run.googleapis.com/request_latencies\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_PERCENTILE_95",
+            "crossSeriesReducer": "REDUCE_MEAN",
+            "groupByFields": ["resource.label.service_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 45000,
+        "duration": "300s",
+        "trigger": {"count": 1}
+      }
+    }
+  ]
+}
+```
+
+Create the policy:
+
+```bash
+sed "s|NOTIFICATION_CHANNEL_PLACEHOLDER|${NOTIFICATION_CHANNEL}|g" \
+  monitoring-cloud-run-p95-latency.json > /tmp/monitoring-cloud-run-p95-latency.json
+
+gcloud monitoring policies create \
+  --project "$PROJECT_ID" \
+  --policy-from-file "/tmp/monitoring-cloud-run-p95-latency.json"
+```
+
+Cloud Run request latency is reported in milliseconds. The 45-second threshold
+is therefore `45000`.
+
+### Alert For Failed Cloud Run Revisions
+
+Create a logs-based alert policy for revision readiness failures. Create
+`monitoring-cloud-run-revision-failure.json`:
+
+```json
+{
+  "displayName": "Support Copilot failed Cloud Run revision",
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": ["NOTIFICATION_CHANNEL_PLACEHOLDER"],
+  "conditions": [
+    {
+      "displayName": "Cloud Run revision readiness failure",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"enterprise-ai-support-copilot\" AND severity>=ERROR AND (textPayload:\"Ready condition status changed to False\" OR jsonPayload.message:\"Ready condition status changed to False\")"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": {"period": "300s"},
+    "autoClose": "1800s"
+  }
+}
+```
+
+Create the policy:
+
+```bash
+sed "s|NOTIFICATION_CHANNEL_PLACEHOLDER|${NOTIFICATION_CHANNEL}|g" \
+  monitoring-cloud-run-revision-failure.json > /tmp/monitoring-cloud-run-revision-failure.json
+
+gcloud monitoring policies create \
+  --project "$PROJECT_ID" \
+  --policy-from-file "/tmp/monitoring-cloud-run-revision-failure.json"
+```
+
+Validate the exact log filter against your project's Cloud Run revision logs
+before enabling paging notifications, because log payload fields can vary by
+revision failure mode.
+
+## Dashboard Recommendations
+
+Create a Cloud Monitoring dashboard with:
+
+- Cloud Run request count by response code class.
+- Cloud Run 5xx rate.
+- Cloud Run p50, p95, and p99 request latency.
+- Cloud Run instance count and memory utilization.
+- Cloud Run revision and deployment events.
+- Log-based panels filtered by `request_id`.
+- Application Prometheus metrics when collection is configured:
+  - `support_copilot_ticket_analysis_requests_total`
+  - `support_copilot_provider_failures_total`
+  - `support_copilot_retrieval_failures_total`
+  - `support_copilot_analysis_escalations_total`
+
+## Prometheus Metrics On Cloud Run
+
+The application exposes Prometheus-compatible metrics at `/metrics`, but Cloud
+Run does not automatically ingest arbitrary application metrics from that
+endpoint into Cloud Monitoring.
+
+To collect these metrics in Google Cloud, add one of the following explicitly:
+
+- Managed Service for Prometheus with a supported collector path.
+- A sidecar or separate scraper that can reach the Cloud Run service and write
+  to Cloud Monitoring.
+- A future OpenTelemetry Collector or custom metrics exporter.
+
+Until that collection path is configured, Cloud Monitoring dashboards and
+alerts should rely on built-in Cloud Run metrics and structured logs. The
+`/metrics` endpoint remains useful for local verification and future managed
+Prometheus collection.
