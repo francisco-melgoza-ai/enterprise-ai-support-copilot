@@ -184,6 +184,110 @@ flag, and retrieved chunk count.
 - Sensitive data concern: inspect span attributes and events; only operational
   metadata should be present.
 
+## Resilience Operations
+
+Gemini ticket analysis and managed Vertex RAG retrieval each have an independent
+timeout, retry policy, and circuit breaker. Vertex RAG can also degrade
+gracefully when retrieval is temporarily unavailable.
+
+### Environment Variables
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `GEMINI_TIMEOUT_SECONDS` | `20` | Per-attempt timeout. Must be greater than zero. |
+| `GEMINI_MAX_ATTEMPTS` | `3` | Total attempts including the first call. Must be at least 1. |
+| `GEMINI_RETRY_BASE_DELAY_SECONDS` | `0.25` | Initial exponential backoff delay. |
+| `GEMINI_RETRY_MAX_DELAY_SECONDS` | `4` | Maximum exponential backoff delay. Must be at least base delay. |
+| `GEMINI_RETRY_JITTER_SECONDS` | `0.25` | Bounded random jitter added to retry delay. |
+| `GEMINI_CIRCUIT_BREAKER_ENABLED` | `true` | Set `false` only for temporary troubleshooting. |
+| `GEMINI_CIRCUIT_FAILURE_THRESHOLD` | `5` | Transient failures before opening the circuit. |
+| `GEMINI_CIRCUIT_RECOVERY_SECONDS` | `30` | Time before the open circuit transitions to half-open. |
+| `GEMINI_CIRCUIT_HALF_OPEN_MAX_CALLS` | `1` | Concurrent probe calls allowed while half-open. |
+| `RAG_TIMEOUT_SECONDS` | `10` | Per-attempt Vertex RAG timeout. |
+| `RAG_MAX_ATTEMPTS` | `2` | Total Vertex RAG attempts including the first call. |
+| `RAG_RETRY_BASE_DELAY_SECONDS` | `0.2` | Initial RAG retry delay. |
+| `RAG_RETRY_MAX_DELAY_SECONDS` | `2` | Maximum RAG retry delay. |
+| `RAG_RETRY_JITTER_SECONDS` | `0.2` | Bounded RAG retry jitter. |
+| `RAG_CIRCUIT_BREAKER_ENABLED` | `true` | Protects Vertex RAG independently from Gemini. |
+| `RAG_CIRCUIT_FAILURE_THRESHOLD` | `5` | Transient RAG failures before opening the circuit. |
+| `RAG_CIRCUIT_RECOVERY_SECONDS` | `30` | Time before RAG half-open probes. |
+| `RAG_CIRCUIT_HALF_OPEN_MAX_CALLS` | `1` | Concurrent RAG half-open probe calls. |
+| `RAG_GRACEFUL_DEGRADATION_ENABLED` | `true` | Allows Gemini analysis to continue without retrieved passages for transient RAG failures. |
+
+Invalid values fail fast at startup or dependency resolution. Examples include
+zero timeouts, attempts below 1, negative delays, max delay below base delay,
+failure thresholds below 1, and half-open probe limits below 1.
+
+### Circuit States
+
+- `closed`: requests flow normally. Successful calls reset consecutive failure
+  count.
+- `open`: calls fail fast without invoking the provider. Logs include
+  `circuit_request_rejected`, and metrics increment
+  `support_copilot_circuit_rejections_total`.
+- `half_open`: after the recovery timeout, a limited number of probe calls are
+  allowed. Successful probes close the circuit. Failed probes reopen it.
+
+### Retryable Failures
+
+Retryable:
+
+- timeout
+- HTTP `408`
+- HTTP `429`
+- HTTP `500`
+- HTTP `502`
+- HTTP `503`
+- HTTP `504`
+- temporary transport failures such as connection errors
+
+Not retryable:
+
+- invalid Gemini structured output
+- schema validation failure
+- authentication failure
+- authorization failure
+- malformed request
+- deterministic configuration errors
+- Vertex RAG response mapping defects
+- programmer errors
+
+### Identifying Open Circuits
+
+Use logs and metrics:
+
+- Log events: `circuit_opened`, `circuit_half_opened`, `circuit_closed`,
+  `circuit_request_rejected`.
+- Metrics:
+  - `support_copilot_circuit_state{component,state}`
+  - `support_copilot_circuit_rejections_total{component}`
+
+Trace attributes include:
+
+- `resilience.component`
+- `resilience.retry_count`
+- `resilience.circuit_state`
+- `resilience.failure_reason`
+
+### Identifying Degraded RAG Requests
+
+When Vertex RAG degrades, the app logs `knowledge_retrieval_degraded`, sets
+`resilience.degraded=true` on the retrieval span, increments
+`support_copilot_degraded_operations_total{component="vertex_rag",reason=...}`,
+and continues Gemini analysis without retrieved passages.
+
+### Safe Tuning
+
+- Increase timeouts only when provider latency is expected and user-facing
+  latency remains acceptable.
+- Prefer small retry counts with jitter to avoid synchronized retry bursts.
+- Avoid aggressive retries during provider incidents; they can amplify load.
+- Raise circuit thresholds only after observing normal transient failure rates.
+- To temporarily disable a circuit breaker, set
+  `GEMINI_CIRCUIT_BREAKER_ENABLED=false` or
+  `RAG_CIRCUIT_BREAKER_ENABLED=false`, then restore protection after
+  investigation.
+
 ## Google Cloud Monitoring Setup
 
 The following commands are one-time setup examples. Review them for your

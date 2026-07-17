@@ -4,6 +4,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.core.resilience import (
+    CircuitBreakerConfig,
+    ResiliencePolicy,
+    RetryPolicy,
+    TimeoutPolicy,
+)
+
 DEFAULT_TICKET_ANALYSIS_PROVIDER = "mock"
 DEFAULT_KNOWLEDGE_PROVIDER = "none"
 DEFAULT_GOOGLE_CLOUD_LOCATION = "us-central1"
@@ -11,6 +18,25 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_APP_ENV = "local"
 DEFAULT_RAG_TOP_K = 3
 DEFAULT_RAG_DISTANCE_THRESHOLD = 0.5
+DEFAULT_GEMINI_TIMEOUT_SECONDS = 20.0
+DEFAULT_GEMINI_MAX_ATTEMPTS = 3
+DEFAULT_GEMINI_RETRY_BASE_DELAY_SECONDS = 0.25
+DEFAULT_GEMINI_RETRY_MAX_DELAY_SECONDS = 4.0
+DEFAULT_GEMINI_RETRY_JITTER_SECONDS = 0.25
+DEFAULT_GEMINI_CIRCUIT_BREAKER_ENABLED = True
+DEFAULT_GEMINI_CIRCUIT_FAILURE_THRESHOLD = 5
+DEFAULT_GEMINI_CIRCUIT_RECOVERY_SECONDS = 30.0
+DEFAULT_GEMINI_CIRCUIT_HALF_OPEN_MAX_CALLS = 1
+DEFAULT_RAG_TIMEOUT_SECONDS = 10.0
+DEFAULT_RAG_MAX_ATTEMPTS = 2
+DEFAULT_RAG_RETRY_BASE_DELAY_SECONDS = 0.2
+DEFAULT_RAG_RETRY_MAX_DELAY_SECONDS = 2.0
+DEFAULT_RAG_RETRY_JITTER_SECONDS = 0.2
+DEFAULT_RAG_CIRCUIT_BREAKER_ENABLED = True
+DEFAULT_RAG_CIRCUIT_FAILURE_THRESHOLD = 5
+DEFAULT_RAG_CIRCUIT_RECOVERY_SECONDS = 30.0
+DEFAULT_RAG_CIRCUIT_HALF_OPEN_MAX_CALLS = 1
+DEFAULT_RAG_GRACEFUL_DEGRADATION_ENABLED = True
 
 
 @dataclass(frozen=True)
@@ -25,6 +51,9 @@ class TicketAnalysisSettings:
     rag_location: str
     rag_top_k: int
     rag_distance_threshold: float
+    gemini_resilience: ResiliencePolicy
+    rag_resilience: ResiliencePolicy
+    rag_graceful_degradation_enabled: bool
 
     @classmethod
     def from_env(
@@ -59,6 +88,34 @@ class TicketAnalysisSettings:
             rag_distance_threshold=_float_env(
                 "RAG_DISTANCE_THRESHOLD", DEFAULT_RAG_DISTANCE_THRESHOLD
             ),
+            gemini_resilience=_resilience_policy_from_env(
+                prefix="GEMINI",
+                timeout_default=DEFAULT_GEMINI_TIMEOUT_SECONDS,
+                max_attempts_default=DEFAULT_GEMINI_MAX_ATTEMPTS,
+                base_delay_default=DEFAULT_GEMINI_RETRY_BASE_DELAY_SECONDS,
+                max_delay_default=DEFAULT_GEMINI_RETRY_MAX_DELAY_SECONDS,
+                jitter_default=DEFAULT_GEMINI_RETRY_JITTER_SECONDS,
+                circuit_enabled_default=DEFAULT_GEMINI_CIRCUIT_BREAKER_ENABLED,
+                failure_threshold_default=DEFAULT_GEMINI_CIRCUIT_FAILURE_THRESHOLD,
+                recovery_default=DEFAULT_GEMINI_CIRCUIT_RECOVERY_SECONDS,
+                half_open_default=DEFAULT_GEMINI_CIRCUIT_HALF_OPEN_MAX_CALLS,
+            ),
+            rag_resilience=_resilience_policy_from_env(
+                prefix="RAG",
+                timeout_default=DEFAULT_RAG_TIMEOUT_SECONDS,
+                max_attempts_default=DEFAULT_RAG_MAX_ATTEMPTS,
+                base_delay_default=DEFAULT_RAG_RETRY_BASE_DELAY_SECONDS,
+                max_delay_default=DEFAULT_RAG_RETRY_MAX_DELAY_SECONDS,
+                jitter_default=DEFAULT_RAG_RETRY_JITTER_SECONDS,
+                circuit_enabled_default=DEFAULT_RAG_CIRCUIT_BREAKER_ENABLED,
+                failure_threshold_default=DEFAULT_RAG_CIRCUIT_FAILURE_THRESHOLD,
+                recovery_default=DEFAULT_RAG_CIRCUIT_RECOVERY_SECONDS,
+                half_open_default=DEFAULT_RAG_CIRCUIT_HALF_OPEN_MAX_CALLS,
+            ),
+            rag_graceful_degradation_enabled=_bool_env(
+                "RAG_GRACEFUL_DEGRADATION_ENABLED",
+                DEFAULT_RAG_GRACEFUL_DEGRADATION_ENABLED,
+            ),
         )
 
 
@@ -82,3 +139,54 @@ def _float_env(name: str, default: float) -> float:
     if value is None or not value.strip():
         return default
     return float(value.strip())
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resilience_policy_from_env(
+    *,
+    prefix: str,
+    timeout_default: float,
+    max_attempts_default: int,
+    base_delay_default: float,
+    max_delay_default: float,
+    jitter_default: float,
+    circuit_enabled_default: bool,
+    failure_threshold_default: int,
+    recovery_default: float,
+    half_open_default: int,
+) -> ResiliencePolicy:
+    return ResiliencePolicy(
+        timeout=TimeoutPolicy(
+            timeout_seconds=_float_env(f"{prefix}_TIMEOUT_SECONDS", timeout_default)
+        ),
+        retry=RetryPolicy(
+            max_attempts=_int_env(f"{prefix}_MAX_ATTEMPTS", max_attempts_default),
+            base_delay_seconds=_float_env(
+                f"{prefix}_RETRY_BASE_DELAY_SECONDS", base_delay_default
+            ),
+            max_delay_seconds=_float_env(
+                f"{prefix}_RETRY_MAX_DELAY_SECONDS", max_delay_default
+            ),
+            jitter_seconds=_float_env(f"{prefix}_RETRY_JITTER_SECONDS", jitter_default),
+        ),
+        circuit_breaker=CircuitBreakerConfig(
+            enabled=_bool_env(
+                f"{prefix}_CIRCUIT_BREAKER_ENABLED", circuit_enabled_default
+            ),
+            failure_threshold=_int_env(
+                f"{prefix}_CIRCUIT_FAILURE_THRESHOLD", failure_threshold_default
+            ),
+            recovery_timeout_seconds=_float_env(
+                f"{prefix}_CIRCUIT_RECOVERY_SECONDS", recovery_default
+            ),
+            half_open_max_calls=_int_env(
+                f"{prefix}_CIRCUIT_HALF_OPEN_MAX_CALLS", half_open_default
+            ),
+        ),
+    )

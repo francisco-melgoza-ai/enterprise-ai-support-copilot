@@ -351,6 +351,59 @@ Initial portfolio/demo SLOs:
 
 These targets should be adjusted using real production traffic.
 
+### Resilience
+
+Gemini ticket analysis and managed Vertex RAG retrieval use explicit
+resilience policies:
+
+```text
+timeout
+→ retry with exponential backoff and bounded jitter
+→ circuit breaker
+→ automatic half-open recovery
+```
+
+Gemini failures still return the existing safe `503` API error after retries
+are exhausted or when the Gemini circuit is open. The public response schema is
+unchanged and provider internals are not exposed.
+
+Managed Vertex RAG is protected independently from Gemini. When Vertex RAG
+times out, has a transient failure, or its circuit is open, and
+`RAG_GRACEFUL_DEGRADATION_ENABLED=true`, analysis continues without retrieved
+passages using the existing no-knowledge prompt path. Local retrieval behavior
+is unchanged.
+
+Local resilience configuration example:
+
+```bash
+export GEMINI_TIMEOUT_SECONDS=20
+export GEMINI_MAX_ATTEMPTS=3
+export GEMINI_RETRY_BASE_DELAY_SECONDS=0.25
+export GEMINI_RETRY_MAX_DELAY_SECONDS=4
+export GEMINI_RETRY_JITTER_SECONDS=0.25
+export GEMINI_CIRCUIT_BREAKER_ENABLED=true
+export GEMINI_CIRCUIT_FAILURE_THRESHOLD=5
+export GEMINI_CIRCUIT_RECOVERY_SECONDS=30
+export GEMINI_CIRCUIT_HALF_OPEN_MAX_CALLS=1
+
+export RAG_TIMEOUT_SECONDS=10
+export RAG_MAX_ATTEMPTS=2
+export RAG_RETRY_BASE_DELAY_SECONDS=0.2
+export RAG_RETRY_MAX_DELAY_SECONDS=2
+export RAG_RETRY_JITTER_SECONDS=0.2
+export RAG_CIRCUIT_BREAKER_ENABLED=true
+export RAG_CIRCUIT_FAILURE_THRESHOLD=5
+export RAG_CIRCUIT_RECOVERY_SECONDS=30
+export RAG_CIRCUIT_HALF_OPEN_MAX_CALLS=1
+export RAG_GRACEFUL_DEGRADATION_ENABLED=true
+```
+
+Production defaults are conservative: Gemini gets up to three attempts, Vertex
+RAG gets up to two attempts, both circuits open after five transient failures,
+and both automatically probe recovery after 30 seconds. Avoid aggressive retry
+settings during provider incidents because retries can amplify load and delay
+customer responses.
+
 ## Deployment
 
 The project is prepared for Cloud Run source deployment with Google Cloud

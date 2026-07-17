@@ -2,6 +2,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -84,6 +85,36 @@ ANALYSIS_ESCALATIONS = Counter(
     "Ticket analyses that require escalation.",
     registry=REGISTRY,
 )
+RESILIENCE_RETRIES = Counter(
+    "support_copilot_resilience_retries_total",
+    "Retry attempts scheduled by component and reason.",
+    ("component", "reason"),
+    registry=REGISTRY,
+)
+CIRCUIT_STATE = Gauge(
+    "support_copilot_circuit_state",
+    "Circuit breaker state by component. Value is 1 for the current state.",
+    ("component", "state"),
+    registry=REGISTRY,
+)
+CIRCUIT_REJECTIONS = Counter(
+    "support_copilot_circuit_rejections_total",
+    "Requests rejected because a circuit is open.",
+    ("component",),
+    registry=REGISTRY,
+)
+DEGRADED_OPERATIONS = Counter(
+    "support_copilot_degraded_operations_total",
+    "Operations that degraded gracefully by component and reason.",
+    ("component", "reason"),
+    registry=REGISTRY,
+)
+RETRY_DELAY = Histogram(
+    "support_copilot_retry_delay_seconds",
+    "Retry delay duration in seconds.",
+    ("component", "reason"),
+    registry=REGISTRY,
+)
 
 
 def record_http_request(
@@ -153,3 +184,28 @@ def record_retrieval_request(
 
 def render_metrics() -> bytes:
     return generate_latest(REGISTRY)
+
+
+def record_resilience_retry(
+    *,
+    component: str,
+    reason: str,
+    delay_seconds: float,
+) -> None:
+    RESILIENCE_RETRIES.labels(component=component, reason=reason).inc()
+    RETRY_DELAY.labels(component=component, reason=reason).observe(delay_seconds)
+
+
+def record_circuit_state(*, component: str, state: str) -> None:
+    for candidate in ("closed", "open", "half_open"):
+        CIRCUIT_STATE.labels(component=component, state=candidate).set(
+            1 if candidate == state else 0
+        )
+
+
+def record_circuit_rejection(*, component: str) -> None:
+    CIRCUIT_REJECTIONS.labels(component=component).inc()
+
+
+def record_degraded_operation(*, component: str, reason: str) -> None:
+    DEGRADED_OPERATIONS.labels(component=component, reason=reason).inc()

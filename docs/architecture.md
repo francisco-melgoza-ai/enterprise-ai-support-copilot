@@ -125,6 +125,37 @@ public response contract includes:
 10. Pydantic validates the model output.
 11. The API returns the structured JSON response with `X-Request-ID`.
 
+## Resilience Flow
+
+```text
+Client
+↓
+Cloud Run
+↓
+FastAPI
+↓
+ticket.analysis
+├── Vertex RAG resilience policy
+│   ├── timeout
+│   ├── retry
+│   ├── circuit breaker
+│   └── graceful degradation
+└── Gemini resilience policy
+    ├── timeout
+    ├── retry
+    └── circuit breaker
+```
+
+Gemini and Vertex RAG use separate retry policies and circuit breakers. Circuit
+state is process-local and long-lived for the Cloud Run instance because the
+configured services are created through cached dependency injection.
+
+Vertex RAG degradation is limited to timeout, transient provider failure, or an
+open RAG circuit when `RAG_GRACEFUL_DEGRADATION_ENABLED=true`. The service then
+continues Gemini analysis with no retrieved passages. Configuration errors,
+authorization failures, response mapping defects, malformed input, and
+programmer errors are not silently degraded.
+
 ## Production Architecture
 
 ```text
