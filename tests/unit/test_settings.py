@@ -17,6 +17,8 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
                 "RAG_LOCATION=us-east1",
                 "RAG_TOP_K=5",
                 "RAG_DISTANCE_THRESHOLD=0.7",
+                "AUTH_PROVIDER=google",
+                "AUTH_GOOGLE_AUDIENCE=https://service.example",
             ]
         )
     )
@@ -28,6 +30,8 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("RAG_LOCATION", raising=False)
     monkeypatch.delenv("RAG_TOP_K", raising=False)
     monkeypatch.delenv("RAG_DISTANCE_THRESHOLD", raising=False)
+    monkeypatch.delenv("AUTH_PROVIDER", raising=False)
+    monkeypatch.delenv("AUTH_GOOGLE_AUDIENCE", raising=False)
 
     settings = TicketAnalysisSettings.from_env(dotenv_path)
 
@@ -42,6 +46,8 @@ def test_settings_load_from_temporary_dotenv(tmp_path, monkeypatch) -> None:
     assert settings.rag_location == "us-east1"
     assert settings.rag_top_k == 5
     assert settings.rag_distance_threshold == 0.7
+    assert settings.auth_provider == "google"
+    assert settings.auth_google_audience == "https://service.example"
 
 
 def test_settings_load_resilience_configuration(monkeypatch) -> None:
@@ -73,6 +79,13 @@ def test_settings_load_resilience_configuration(monkeypatch) -> None:
 def test_settings_reject_invalid_resilience_configuration(monkeypatch) -> None:
     monkeypatch.setenv("RAG_RETRY_BASE_DELAY_SECONDS", "2")
     monkeypatch.setenv("RAG_RETRY_MAX_DELAY_SECONDS", "1")
+
+    with pytest.raises(ValueError):
+        TicketAnalysisSettings.from_env()
+
+
+def test_settings_reject_unsupported_auth_provider(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_PROVIDER", "unsupported")
 
     with pytest.raises(ValueError):
         TicketAnalysisSettings.from_env()

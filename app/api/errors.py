@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.core.auth import AuthenticationError, AuthorizationError
 from app.services.ticket_analysis import TicketAnalysisServiceError
 
 
@@ -33,6 +34,35 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "error": {
                     "code": "ticket_analysis_unavailable",
                     "message": "Ticket analysis is temporarily unavailable.",
+                }
+            },
+        )
+
+    @app.exception_handler(AuthenticationError)
+    async def authentication_exception_handler(
+        request: Request, exc: AuthenticationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+            content={
+                "error": {
+                    "code": "authentication_failed",
+                    "message": "Authentication is required.",
+                }
+            },
+        )
+
+    @app.exception_handler(AuthorizationError)
+    async def authorization_exception_handler(
+        request: Request, exc: AuthorizationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "authorization_failed",
+                    "message": "Insufficient permissions.",
                 }
             },
         )

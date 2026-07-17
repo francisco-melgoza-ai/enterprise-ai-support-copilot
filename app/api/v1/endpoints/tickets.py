@@ -3,7 +3,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from app.api.dependencies.auth import require_any_role
 from app.api.dependencies.services import get_ticket_analysis_service
+from app.core.auth import AuthenticatedPrincipal, SupportRole
 from app.core.logging import get_request_id
 from app.core.metrics import (
     record_ticket_analysis_failure,
@@ -17,12 +19,23 @@ from app.services.ticket_analysis import TicketAnalysisService
 router = APIRouter()
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
+ticket_analysis_role_dependency = require_any_role(
+    {
+        SupportRole.SUPPORT_AGENT.value,
+        SupportRole.SUPPORT_MANAGER.value,
+        SupportRole.PLATFORM_ADMIN.value,
+    }
+)
 
 
 @router.post("/analyze", response_model=TicketAnalysisResponse)
 async def analyze_ticket(
     ticket: TicketAnalysisRequest,
     service: Annotated[TicketAnalysisService, Depends(get_ticket_analysis_service)],
+    _principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(ticket_analysis_role_dependency),
+    ],
 ) -> TicketAnalysisResponse:
     logger.info("ticket_analysis_requested")
     record_ticket_analysis_request()

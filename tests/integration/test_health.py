@@ -3,10 +3,24 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies.auth import get_authentication_provider
 from app.api.dependencies.services import get_ticket_analysis_service
 from app.main import app
 from app.schemas.tickets import TicketAnalysisRequest, TicketAnalysisResponse
 from app.services.ticket_analysis import TicketAnalysisProviderError
+
+AGENT_HEADERS = {"Authorization": "Bearer mock:agent-123:support_agent"}
+MANAGER_HEADERS = {"Authorization": "Bearer mock:manager-456:support_manager"}
+ADMIN_HEADERS = {"Authorization": "Bearer mock:admin-789:platform_admin"}
+
+
+@pytest.fixture(autouse=True)
+def use_mock_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_PROVIDER", "mock")
+    monkeypatch.setenv("APP_ENV", "local")
+    get_authentication_provider.cache_clear()
+    yield
+    get_authentication_provider.cache_clear()
 
 
 def test_health_endpoint() -> None:
@@ -57,7 +71,7 @@ def test_ready_endpoint_returns_structured_response(
 def test_metrics_endpoint_returns_prometheus_metrics() -> None:
     client = TestClient(app)
 
-    response = client.get("/metrics")
+    response = client.get("/metrics", headers=MANAGER_HEADERS)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -72,7 +86,7 @@ def test_metrics_endpoint_returns_prometheus_metrics() -> None:
 def test_metrics_count_http_requests_by_route_template() -> None:
     client = TestClient(app)
     before = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_http_requests_total",
         {"endpoint": "/health", "method": "GET", "status_code": "200"},
     )
@@ -80,7 +94,7 @@ def test_metrics_count_http_requests_by_route_template() -> None:
     response = client.get("/health", headers={"X-Request-ID": "metric-request-id"})
 
     after = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_http_requests_total",
         {"endpoint": "/health", "method": "GET", "status_code": "200"},
     )
@@ -91,7 +105,7 @@ def test_metrics_count_http_requests_by_route_template() -> None:
 def test_metrics_count_failed_http_requests() -> None:
     client = TestClient(app)
     before = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_http_requests_total",
         {"endpoint": "unmatched", "method": "GET", "status_code": "404"},
     )
@@ -99,7 +113,7 @@ def test_metrics_count_failed_http_requests() -> None:
     response = client.get("/does-not-exist")
 
     after = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_http_requests_total",
         {"endpoint": "unmatched", "method": "GET", "status_code": "404"},
     )
@@ -120,7 +134,7 @@ def test_ticket_analysis_metrics_increment_and_avoid_sensitive_labels(
         "channel": "email",
     }
     before = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_ticket_analysis_requests_total",
         {},
     )
@@ -128,10 +142,10 @@ def test_ticket_analysis_metrics_increment_and_avoid_sensitive_labels(
     response = client.post(
         "/api/v1/tickets/analyze",
         json=payload,
-        headers={"X-Request-ID": "metrics-secret-request-id"},
+        headers={**AGENT_HEADERS, "X-Request-ID": "metrics-secret-request-id"},
     )
 
-    metrics = client.get("/metrics").text
+    metrics = client.get("/metrics", headers=MANAGER_HEADERS).text
     after = _metric_value(
         metrics,
         "support_copilot_ticket_analysis_requests_total",
@@ -157,7 +171,7 @@ def test_ticket_analysis_failure_metric_increments() -> None:
     )
     client = TestClient(app)
     before = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_ticket_analysis_failure_total",
         {},
     )
@@ -169,17 +183,84 @@ def test_ticket_analysis_failure_metric_increments() -> None:
     }
 
     try:
-        response = client.post("/api/v1/tickets/analyze", json=payload)
+        response = client.post(
+            "/api/v1/tickets/analyze", json=payload, headers=AGENT_HEADERS
+        )
     finally:
         app.dependency_overrides.clear()
 
     after = _metric_value(
-        client.get("/metrics").text,
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
         "support_copilot_ticket_analysis_failure_total",
         {},
     )
     assert response.status_code == 503
     assert after == before + 1
+
+
+def test_metrics_endpoint_requires_authentication() -> None:
+    client = TestClient(app)
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.json()["error"]["code"] == "authentication_failed"
+
+
+def test_metrics_endpoint_rejects_insufficient_role() -> None:
+    client = TestClient(app)
+
+    response = client.get("/metrics", headers=AGENT_HEADERS)
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "authorization_failed"
+
+
+def test_metrics_endpoint_accepts_admin_token() -> None:
+    client = TestClient(app)
+
+    response = client.get("/metrics", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+
+
+def test_authentication_and_authorization_metrics_increment() -> None:
+    client = TestClient(app)
+    before_auth = _metric_value(
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
+        "support_copilot_authentication_requests_total",
+        {"provider": "mock", "outcome": "success"},
+    )
+    before_authz = _metric_value(
+        client.get("/metrics", headers=MANAGER_HEADERS).text,
+        "support_copilot_authorization_requests_total",
+        {"outcome": "success"},
+    )
+
+    response = client.get("/metrics", headers=ADMIN_HEADERS)
+
+    metrics = client.get("/metrics", headers=MANAGER_HEADERS).text
+    assert response.status_code == 200
+    assert (
+        _metric_value(
+            metrics,
+            "support_copilot_authentication_requests_total",
+            {"provider": "mock", "outcome": "success"},
+        )
+        > before_auth
+    )
+    assert (
+        _metric_value(
+            metrics,
+            "support_copilot_authorization_requests_total",
+            {"outcome": "success"},
+        )
+        > before_authz
+    )
+    assert "mock:manager-456:support_manager" not in metrics
+    assert "manager-456" not in metrics
+    assert "admin-789" not in metrics
 
 
 def _metric_value(

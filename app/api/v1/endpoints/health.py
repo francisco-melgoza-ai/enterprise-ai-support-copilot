@@ -1,9 +1,19 @@
-from fastapi import APIRouter, Response, status
+from typing import Annotated
 
+from fastapi import APIRouter, Depends, Response, status
+
+from app.api.dependencies.auth import require_any_role
+from app.core.auth import AuthenticatedPrincipal, SupportRole
 from app.core.metrics import METRICS_CONTENT_TYPE, render_metrics
 from app.core.settings import TicketAnalysisSettings
 
 router = APIRouter(tags=["health"])
+metrics_role_dependency = require_any_role(
+    {
+        SupportRole.SUPPORT_MANAGER.value,
+        SupportRole.PLATFORM_ADMIN.value,
+    }
+)
 
 
 @router.get("/health")
@@ -35,5 +45,10 @@ async def readiness_check(response: Response) -> dict[str, str]:
 
 
 @router.get("/metrics")
-async def metrics() -> Response:
+async def metrics(
+    _principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(metrics_role_dependency),
+    ],
+) -> Response:
     return Response(content=render_metrics(), media_type=METRICS_CONTENT_TYPE)

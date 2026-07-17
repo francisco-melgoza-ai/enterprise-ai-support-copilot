@@ -23,6 +23,7 @@ def log_startup_configuration() -> None:
             "provider": settings.provider.lower(),
             "model": settings.gemini_model,
             "cloud_region": settings.google_cloud_location,
+            "auth_provider": settings.auth_provider,
         },
     )
 
