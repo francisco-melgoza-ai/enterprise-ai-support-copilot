@@ -89,3 +89,32 @@ def test_settings_reject_unsupported_auth_provider(monkeypatch) -> None:
 
     with pytest.raises(ValueError):
         TicketAnalysisSettings.from_env()
+
+
+def test_settings_load_conversation_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("CONVERSATION_TTL_SECONDS", "7200")
+    monkeypatch.setenv("CONVERSATION_SUMMARY_THRESHOLD", "9")
+    monkeypatch.setenv("CONVERSATION_MAX_RECENT_MESSAGES", "4")
+
+    settings = TicketAnalysisSettings.from_env()
+
+    assert settings.conversation_ttl_seconds == 7200
+    assert settings.conversation_summary_threshold == 9
+    assert settings.conversation_max_recent_messages == 4
+
+
+def test_settings_reject_invalid_conversation_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("CONVERSATION_TTL_SECONDS", "0")
+
+    with pytest.raises(ValueError):
+        TicketAnalysisSettings.from_env()
+
+
+def test_settings_require_summary_threshold_above_recent_messages(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONVERSATION_SUMMARY_THRESHOLD", "4")
+    monkeypatch.setenv("CONVERSATION_MAX_RECENT_MESSAGES", "4")
+
+    with pytest.raises(ValueError):
+        TicketAnalysisSettings.from_env()

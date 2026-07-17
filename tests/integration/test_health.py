@@ -162,7 +162,7 @@ def test_ticket_analysis_metrics_increment_and_avoid_sensitive_labels(
 def test_ticket_analysis_failure_metric_increments() -> None:
     class FailingTicketAnalysisService:
         async def analyze(
-            self, ticket: TicketAnalysisRequest
+            self, ticket: TicketAnalysisRequest, memory_context: object | None = None
         ) -> TicketAnalysisResponse:
             raise TicketAnalysisProviderError("provider failed")
 

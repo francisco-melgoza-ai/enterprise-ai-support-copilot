@@ -76,6 +76,9 @@ Denominator: all `/health` uptime checks.
 - `/metrics`: Prometheus-compatible application metrics. Metrics intentionally
   exclude ticket text, prompts, generated responses, retrieved content,
   credentials, and request IDs.
+- `/api/v1/conversations`: authenticated conversation lifecycle endpoints.
+- `/api/v1/conversations/{conversation_id}/messages`: authenticated message
+  history endpoints. Message content must never appear in logs or metrics.
 
 Local verification:
 
@@ -262,6 +265,64 @@ flag, and retrieved chunk count.
   tracing configuration.
 - Sensitive data concern: inspect span attributes and events; only operational
   metadata should be present.
+
+## Conversation Memory Operations
+
+Conversation memory is process-local in this milestone and stored by
+`InMemoryConversationRepository`. It is suitable for local development,
+functional validation, and Cloud Run single-instance demos, but it is not a
+durable multi-instance production store. A managed repository should replace it
+before relying on conversation continuity across instance restarts or scale-out.
+
+Configuration:
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `CONVERSATION_TTL_SECONDS` | `86400` | Conversation expiry window. |
+| `CONVERSATION_SUMMARY_THRESHOLD` | `12` | Message count that triggers summarization. |
+| `CONVERSATION_MAX_RECENT_MESSAGES` | `6` | Recent messages retained after summarization and supplied to Gemini. Must be lower than `CONVERSATION_SUMMARY_THRESHOLD`. |
+
+Lifecycle:
+
+1. A caller creates a conversation with `POST /api/v1/conversations`.
+2. The authenticated subject becomes `owner_subject`.
+3. Only the owner can load, append, list, or delete the conversation.
+4. `platform_admin` can access any conversation for operational support.
+5. `support_manager` does not receive owner override automatically.
+6. Cross-owner access and expired conversations are treated as not found.
+7. `GET /api/v1/conversations/{conversation_id}/messages` is bounded by a
+   `limit` query parameter from `1` through `100`, defaulting to `50`.
+8. `DELETE /api/v1/conversations/{conversation_id}` returns `204 No Content`
+   after deleting an existing conversation.
+9. Older messages are summarized when thresholds are exceeded.
+10. Only `platform_admin` may append `system` messages.
+
+Summarization:
+
+- The local/test summarizer is deterministic and does not call Google Cloud.
+- Summaries preserve high-level continuity and message role counts without
+  logging content.
+- If summarization fails, message history remains unsummarized and intact.
+- Future Gemini summarization should remain behind the `ConversationSummarizer`
+  protocol and preserve the same privacy policy.
+
+Metrics:
+
+- `support_copilot_conversations_created_total`
+- `support_copilot_active_conversations`
+- `support_copilot_conversation_messages_added_total{role}`
+- `support_copilot_conversation_summaries_generated_total`
+- `support_copilot_conversation_message_count`
+- `support_copilot_average_conversation_length`
+
+Do not use conversation IDs, owner subjects, message IDs, or message content as
+metric labels.
+
+These conversation metrics are process-local while the in-memory repository is
+in use. In a multi-worker or multi-instance Cloud Run deployment they describe
+only the serving process that emitted them, so production reporting should move
+conversation state to a durable managed repository before treating active-count
+or average-length metrics as global truth.
 
 ## Resilience Operations
 

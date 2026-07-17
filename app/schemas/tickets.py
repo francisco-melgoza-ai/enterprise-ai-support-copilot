@@ -13,6 +13,9 @@ DescriptionString = Annotated[
 LanguageString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)
 ]
+ConversationIdString = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+]
 
 
 class TicketChannel(StrEnum):
@@ -42,6 +45,7 @@ class TicketAnalysisRequest(BaseModel):
     description: DescriptionString
     channel: TicketChannel
     customer_language: LanguageString = "en"
+    conversation_id: ConversationIdString | None = None
 
 
 class TicketAnalysisResponse(BaseModel):

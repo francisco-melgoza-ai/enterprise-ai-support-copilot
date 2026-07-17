@@ -20,7 +20,14 @@ from app.core.tracing import (
     get_tracer,
 )
 from app.main import app
+from app.repositories.conversations import InMemoryConversationRepository
+from app.schemas.conversations import ConversationRole
 from app.schemas.tickets import TicketAnalysisRequest, TicketAnalysisResponse
+from app.services.conversations import (
+    ConversationService,
+    MemoryManager,
+    MockConversationSummarizer,
+)
 from app.services.knowledge import LocalKnowledgeRetriever
 from app.services.ticket_analysis import (
     GeminiTicketAnalysisService,
@@ -133,6 +140,52 @@ async def test_authentication_span_is_created() -> None:
     serialized_attributes = " ".join(str(value) for value in span.attributes.values())
     assert "agent-123" not in serialized_attributes
     assert "mock:agent-123:support_agent" not in serialized_attributes
+
+
+@pytest.mark.anyio
+async def test_conversation_spans_are_created() -> None:
+    service = ConversationService(
+        repository=InMemoryConversationRepository(),
+        memory_manager=MemoryManager(
+            summarizer=MockConversationSummarizer(),
+            summary_threshold=2,
+            max_recent_messages=1,
+        ),
+        ttl_seconds=3600,
+    )
+    principal = await MockAuthenticationProvider(
+        settings=TicketAnalysisSettings.from_env()
+    ).authenticate("mock:agent-123:support_agent")
+
+    conversation = await service.create_conversation(principal=principal)
+    await service.append_message(
+        conversation_id=conversation.conversation_id,
+        principal=principal,
+        role=ConversationRole.USER,
+        content="first",
+    )
+    await service.append_message(
+        conversation_id=conversation.conversation_id,
+        principal=principal,
+        role=ConversationRole.USER,
+        content="second",
+    )
+    await service.append_message(
+        conversation_id=conversation.conversation_id,
+        principal=principal,
+        role=ConversationRole.USER,
+        content="third",
+    )
+    await service.delete_conversation(
+        conversation_id=conversation.conversation_id,
+        principal=principal,
+    )
+
+    span_names = {span.name for span in get_finished_spans()}
+    assert "conversation.create" in span_names
+    assert "conversation.append" in span_names
+    assert "conversation.summarize" in span_names
+    assert "conversation.delete" in span_names
 
 
 @pytest.mark.anyio

@@ -13,6 +13,8 @@ Role authorization
 ↓
 Dependency Injection
 ↓
+ConversationService
+↓
 TicketAnalysisService
 ↓
 KnowledgeRetriever
@@ -65,8 +67,8 @@ verification.
 
 ### Dependency Injection
 
-FastAPI dependency injection selects the configured analysis and knowledge
-providers from environment variables:
+FastAPI dependency injection selects the configured analysis, conversation, and
+knowledge providers from environment variables:
 
 - `TICKET_ANALYSIS_PROVIDER=mock`
 - `TICKET_ANALYSIS_PROVIDER=gemini`
@@ -75,6 +77,37 @@ providers from environment variables:
 - `KNOWLEDGE_PROVIDER=vertex_rag`
 
 Unsupported provider values fail clearly during dependency resolution.
+
+### ConversationService
+
+`ConversationService` owns session lifecycle:
+
+- creates conversations for the authenticated subject
+- validates ownership on load, append, list, and delete
+- allows `platform_admin` to access any conversation
+- treats cross-owner access as not found to avoid conversation existence
+  inference
+- enforces expiration
+- appends messages without logging content
+- restricts externally supplied `system` messages to `platform_admin`
+- delegates summarization to `MemoryManager`
+
+The service depends on a `ConversationRepository` protocol. The current
+`InMemoryConversationRepository` is local and process-bound; it is intentionally
+replaceable by a managed store later. It is not durable, not multi-instance
+safe, and should be replaced by Firestore, Cloud SQL, or another approved
+managed repository before production use that depends on conversation
+continuity across Cloud Run restarts or scale-out.
+
+### MemoryManager
+
+`MemoryManager` preserves useful context while bounding prompt size. When the
+message count exceeds `CONVERSATION_SUMMARY_THRESHOLD`, older messages are
+summarized and only `CONVERSATION_MAX_RECENT_MESSAGES` are retained. The
+current summarizer is deterministic for local and CI runs. Gemini-based
+summarization can be added behind the same summarizer protocol. Summarization
+failure preserves the existing unsummarized message history instead of deleting
+or corrupting messages.
 
 ### TicketAnalysisService
 
@@ -141,17 +174,20 @@ public response contract includes:
    principal.
 4. The authorization dependency checks the required support role.
 5. FastAPI validates the request body with Pydantic.
-6. Dependency injection resolves the configured `TicketAnalysisService`.
-7. In mock mode, the mock service returns deterministic analysis.
-8. In Gemini mode, the service optionally calls the configured
+6. If `conversation_id` is provided, the conversation service validates
+   ownership and loads rolling summary plus recent messages.
+7. Dependency injection resolves the configured `TicketAnalysisService`.
+8. In mock mode, the mock service returns deterministic analysis.
+9. In Gemini mode, the service optionally calls the configured
    `KnowledgeRetriever`.
-9. With `KNOWLEDGE_PROVIDER=vertex_rag`, the retriever calls Vertex AI RAG
+10. With `KNOWLEDGE_PROVIDER=vertex_rag`, the retriever calls Vertex AI RAG
    Engine and maps contexts into retrieved passages.
-10. Retrieved passages are inserted into the Gemini prompt as untrusted support
-   knowledge.
-11. Gemini 2.5 Flash returns structured output.
-12. Pydantic validates the model output.
-13. The API returns the structured JSON response with `X-Request-ID`.
+11. Conversation memory, retrieved passages, and the current ticket are
+   inserted into the Gemini prompt as untrusted context.
+12. Gemini 2.5 Flash returns structured output.
+13. Pydantic validates the model output.
+14. If `conversation_id` is provided, user and assistant messages are appended.
+15. The API returns the structured JSON response with `X-Request-ID`.
 
 ## Resilience Flow
 
@@ -422,6 +458,8 @@ Custom spans use safe, low-cardinality attributes:
 
 - `ticket.analysis`: category, priority, escalation flag.
 - `auth.authenticate`: provider, outcome, role count.
+- `conversation.create`, `conversation.load`, `conversation.append`,
+  `conversation.delete`, `conversation.summarize`: bounded lifecycle metadata.
 - `knowledge.retrieve`: provider, outcome, retrieved chunk count.
 - `provider.generate`: provider, model, outcome, retry attempt count.
 
@@ -441,6 +479,8 @@ prompts, generated content, retrieved document content, credentials, or PII.
   and subject checks through the official Google authentication library.
 - Uses normalized roles for authorization:
   `support_agent`, `support_manager`, and `platform_admin`.
+- Enforces conversation ownership by authenticated subject. `platform_admin`
+  is the only admin override.
 - Blocks mock authentication in production unless explicitly overridden.
 - Does not store credential JSON files in the repository.
 - Does not log bearer tokens, raw JWTs, authorization headers, full identity
@@ -460,6 +500,8 @@ Testing coverage includes:
   normalization, and provider selection.
 - Integration tests for `GET /health`.
 - Integration tests for `POST /api/v1/tickets/analyze`.
+- Unit and integration tests for conversation lifecycle, ownership, expiration,
+  summarization, metrics, tracing, and logging privacy.
 - Mock providers and fake adapters so automated tests do not require Google
   Cloud access.
 - Live validation of Cloud Run, managed RAG retrieval, Gemini generation,
@@ -536,7 +578,6 @@ Generated evaluation outputs are written as JSON and Markdown under
 The current implementation does not include:
 
 - BigQuery conversation analytics
-- Authentication or authorization
 - Terraform
 - Frontend UI
 - Agent workflows

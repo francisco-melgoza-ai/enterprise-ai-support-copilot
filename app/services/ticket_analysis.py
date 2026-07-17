@@ -23,6 +23,7 @@ from app.core.resilience import (
     run_with_resilience,
 )
 from app.core.tracing import get_tracer, record_span_exception, set_span_attributes
+from app.schemas.conversations import ConversationMemoryContext
 from app.schemas.tickets import (
     TicketAnalysisRequest,
     TicketAnalysisResponse,
@@ -68,12 +69,20 @@ class GeminiModelClient(Protocol):
 
 
 class TicketAnalysisService(Protocol):
-    async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
+    async def analyze(
+        self,
+        ticket: TicketAnalysisRequest,
+        memory_context: ConversationMemoryContext | None = None,
+    ) -> TicketAnalysisResponse:
         """Analyze a support ticket without mutating external state."""
 
 
 class MockTicketAnalysisService:
-    async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
+    async def analyze(
+        self,
+        ticket: TicketAnalysisRequest,
+        memory_context: ConversationMemoryContext | None = None,
+    ) -> TicketAnalysisResponse:
         text = f"{ticket.subject} {ticket.description}".lower()
         priority = self._priority(text)
         sentiment = self._sentiment(text)
@@ -231,13 +240,20 @@ class GeminiTicketAnalysisService:
             ).aio.models
         )
 
-    async def analyze(self, ticket: TicketAnalysisRequest) -> TicketAnalysisResponse:
+    async def analyze(
+        self,
+        ticket: TicketAnalysisRequest,
+        memory_context: ConversationMemoryContext | None = None,
+    ) -> TicketAnalysisResponse:
         started_at = time.perf_counter()
         attempt_count = 0
         outcome = "error"
 
         try:
-            prompt, config = await self._build_generation_request(ticket)
+            prompt, config = await self._build_generation_request(
+                ticket,
+                memory_context,
+            )
             with tracer.start_as_current_span("provider.generate") as span:
                 set_span_attributes(
                     span,
@@ -312,12 +328,18 @@ class GeminiTicketAnalysisService:
             )
 
     async def _build_generation_request(
-        self, ticket: TicketAnalysisRequest
+        self,
+        ticket: TicketAnalysisRequest,
+        memory_context: ConversationMemoryContext | None,
     ) -> tuple[str, types.GenerateContentConfig]:
         retrieved_passages = None
         if self._knowledge_retriever is not None:
             retrieved_passages = await self._knowledge_retriever.retrieve(ticket)
-        prompt = build_ticket_analysis_prompt(ticket, retrieved_passages)
+        prompt = build_ticket_analysis_prompt(
+            ticket,
+            retrieved_passages,
+            memory_context,
+        )
         config = types.GenerateContentConfig(
             system_instruction=TICKET_ANALYSIS_SYSTEM_PROMPT,
             response_mime_type="application/json",

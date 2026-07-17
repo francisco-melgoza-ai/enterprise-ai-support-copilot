@@ -127,6 +127,38 @@ AUTHORIZATION_REQUESTS = Counter(
     ("outcome",),
     registry=REGISTRY,
 )
+CONVERSATIONS_CREATED = Counter(
+    "support_copilot_conversations_created_total",
+    "Conversations created by the API.",
+    registry=REGISTRY,
+)
+ACTIVE_CONVERSATIONS = Gauge(
+    "support_copilot_active_conversations",
+    "Active non-expired conversations.",
+    registry=REGISTRY,
+)
+CONVERSATION_MESSAGES_ADDED = Counter(
+    "support_copilot_conversation_messages_added_total",
+    "Conversation messages added by role.",
+    ("role",),
+    registry=REGISTRY,
+)
+CONVERSATION_SUMMARIES_GENERATED = Counter(
+    "support_copilot_conversation_summaries_generated_total",
+    "Conversation summaries generated.",
+    registry=REGISTRY,
+)
+CONVERSATION_MESSAGE_COUNT = Histogram(
+    "support_copilot_conversation_message_count",
+    "Conversation message count observed after message append.",
+    buckets=(0, 1, 2, 3, 5, 8, 13, 21, 34, float("inf")),
+    registry=REGISTRY,
+)
+AVERAGE_CONVERSATION_LENGTH = Gauge(
+    "support_copilot_average_conversation_length",
+    "Average stored message count across active conversations.",
+    registry=REGISTRY,
+)
 
 
 def record_http_request(
@@ -229,3 +261,27 @@ def record_authentication_request(*, provider: str, outcome: str) -> None:
 
 def record_authorization_request(*, outcome: str) -> None:
     AUTHORIZATION_REQUESTS.labels(outcome=outcome).inc()
+
+
+def record_conversation_created(*, active_count: int) -> None:
+    CONVERSATIONS_CREATED.inc()
+    ACTIVE_CONVERSATIONS.set(active_count)
+
+
+def record_conversation_deleted(*, active_count: int) -> None:
+    ACTIVE_CONVERSATIONS.set(active_count)
+
+
+def record_conversation_message_added(
+    *,
+    role: str,
+    message_count: int,
+    average_length: float,
+) -> None:
+    CONVERSATION_MESSAGES_ADDED.labels(role=role).inc()
+    CONVERSATION_MESSAGE_COUNT.observe(message_count)
+    AVERAGE_CONVERSATION_LENGTH.set(average_length)
+
+
+def record_conversation_summary_generated() -> None:
+    CONVERSATION_SUMMARIES_GENERATED.inc()
