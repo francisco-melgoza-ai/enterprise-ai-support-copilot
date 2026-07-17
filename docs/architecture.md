@@ -169,6 +169,75 @@ Observed validation facts:
 - Request correlation verified using `X-Request-ID`
 - Cloud Run memory increased from `512 MiB` to `1 GiB` to resolve memory limits
 
+## Continuous Deployment Architecture
+
+```text
+GitHub push to main
+↓
+GitHub Actions CD
+↓
+GitHub OIDC token
+↓
+Google Workload Identity Federation
+↓
+deployment service account
+↓
+Cloud Run
+↓
+health verification
+```
+
+The CD workflow is intentionally separate from CI. CI validates code quality,
+tests, and deterministic local evaluation. CD deploys only after a push to
+`main` or an explicit manual dispatch.
+
+### GitHub Actions CD
+
+The CD workflow runs from `.github/workflows/cd.yml`. It checks out the
+repository, validates that required repository variables are present, exchanges
+a GitHub OIDC token for Google Cloud access through Workload Identity
+Federation, deploys from source with `gcloud run deploy`, captures the Cloud
+Run service URL, and verifies `GET /health`.
+
+### GitHub OIDC Token
+
+GitHub issues a short-lived OIDC token to the workflow because the workflow has
+`id-token: write`. The token identifies the repository and workflow context. No
+service account JSON key, API key, downloaded credential file, or long-lived
+Google Cloud secret is used.
+
+### Workload Identity Federation
+
+Google Cloud Workload Identity Federation validates the GitHub token through a
+provider whose attribute condition is restricted to:
+
+```text
+francisco-melgoza-ai/enterprise-ai-support-copilot
+```
+
+The principal set for that repository receives
+`roles/iam.workloadIdentityUser` on the deployment service account, allowing
+GitHub Actions to impersonate that account only through the configured provider.
+
+### Deployment Service Account
+
+The deployment service account performs the source deployment. It requires
+permissions to administer Cloud Run, create Cloud Build builds for source
+deployment, write build artifacts, and act as the Cloud Run runtime service
+account.
+
+### Cloud Run Runtime Service Account
+
+The runtime service account is attached to the deployed Cloud Run service. It
+is the identity used by the application for Vertex AI Gemini and Vertex AI RAG
+Engine access through Application Default Credentials.
+
+### Health Verification
+
+After deployment, the workflow resolves the Cloud Run URL and calls `/health`
+with retries to allow for transient startup delay. The deployment fails unless
+the endpoint returns HTTP `200`.
+
 ## Observability
 
 The application uses structured JSON logging and request correlation.
@@ -317,7 +386,6 @@ The current implementation does not include:
 - BigQuery conversation analytics
 - Authentication or authorization
 - Terraform
-- CI/CD
 - Frontend UI
 - Agent workflows
 - Automated production knowledge ingestion pipeline

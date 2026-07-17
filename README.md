@@ -1,6 +1,7 @@
 # Enterprise AI Support Copilot
 
 [![CI](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/ci.yml)
+[![CD](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/cd.yml/badge.svg)](https://github.com/francisco-melgoza-ai/enterprise-ai-support-copilot/actions/workflows/cd.yml)
 
 ## Project Overview
 
@@ -16,8 +17,8 @@ Gemini generation through Vertex AI, and managed knowledge grounding through
 Vertex AI RAG Engine.
 
 This module intentionally does not implement BigQuery analytics, Terraform,
-CI/CD, authentication, agents, a frontend, or an automated knowledge ingestion
-pipeline yet.
+application authentication, agents, a frontend, or an automated knowledge
+ingestion pipeline yet.
 
 ## Architecture
 
@@ -469,6 +470,217 @@ python scripts/run_evaluation.py \
 The workflow uploads the generated evaluation JSON and Markdown report as the
 `evaluation-results` artifact, including when threshold evaluation fails.
 
+## Continuous Deployment
+
+GitHub Actions CD is defined separately from CI in
+`.github/workflows/cd.yml`. It deploys the production Cloud Run service from
+source when changes are pushed to `main`, and it can also be started manually
+from the GitHub Actions **CD** workflow with **Run workflow**.
+
+The CD workflow uses GitHub OpenID Connect and Google Cloud Workload Identity
+Federation. GitHub does not store a service account JSON key. Instead, GitHub
+issues a short-lived OIDC token for the workflow run, Google Cloud verifies the
+token through a Workload Identity Provider restricted to this repository, and
+the workflow impersonates a deployment service account.
+
+Deployment flow:
+
+```text
+GitHub push to main
+↓
+GitHub Actions CD
+↓
+GitHub OIDC token
+↓
+Google Workload Identity Federation
+↓
+deployment service account
+↓
+gcloud run deploy --source .
+↓
+Cloud Run
+↓
+/health verification
+```
+
+Repository variables required by CD:
+
+- `GCP_PROJECT_ID`: Google Cloud project that hosts Cloud Run.
+- `GCP_REGION`: Cloud Run region, for example `us-central1`.
+- `WORKLOAD_IDENTITY_PROVIDER`: full Workload Identity Provider resource name.
+- `DEPLOY_SERVICE_ACCOUNT`: deployment service account email.
+- `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`: runtime service account email used by
+  the deployed Cloud Run service.
+- `CLOUD_RUN_SERVICE`: must be `enterprise-ai-support-copilot`.
+- `TICKET_ANALYSIS_PROVIDER`: production analysis provider, typically
+  `gemini`.
+- `KNOWLEDGE_PROVIDER`: production knowledge provider, typically `vertex_rag`.
+- `GOOGLE_CLOUD_PROJECT`: project used by the application for Vertex AI.
+- `GOOGLE_CLOUD_LOCATION`: Vertex AI location, for example `us-central1`.
+- `GEMINI_MODEL`: model name, for example `gemini-2.5-flash`.
+- `RAG_CORPUS_RESOURCE_NAME`: managed RAG corpus resource name.
+- `RAG_LOCATION`: RAG corpus location.
+
+The workflow validates these variables before deployment and fails if any are
+blank. It uses `--update-env-vars` so existing Cloud Run environment variables
+outside this list are preserved, and it does not overwrite configured values
+with empty strings.
+
+No GitHub secrets are required for authentication. Use repository secrets only
+for future application environment values that truly must remain private. Do
+not store service account keys, downloaded credential files, API keys, or
+long-lived Google Cloud credentials in GitHub.
+
+After deployment, the workflow captures the Cloud Run URL with
+`gcloud run services describe`, then calls `/health` up to 12 times with a
+short delay between attempts. The deployment fails unless `/health` returns
+HTTP `200`. The health step prints the URL, status codes, and a small response
+body excerpt for diagnostics without exposing credentials or application
+secrets.
+
+### One-Time Workload Identity Federation Setup
+
+Run these commands from an administrator workstation with permission to create
+service accounts, configure IAM, and create Workload Identity Federation
+resources. Do not run them from the CD workflow.
+
+Set project-specific values:
+
+```bash
+export PROJECT_ID="your-project-id"
+export REGION="us-central1"
+export REPO="francisco-melgoza-ai/enterprise-ai-support-copilot"
+export POOL_ID="github-actions"
+export PROVIDER_ID="github"
+export DEPLOY_SA_ID="support-copilot-deployer"
+export RUNTIME_SA_ID="support-copilot-runtime"
+
+export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" \
+  --format 'value(projectNumber)')"
+export DEPLOY_SA_EMAIL="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+export RUNTIME_SA_EMAIL="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+Enable required APIs:
+
+```bash
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  iamcredentials.googleapis.com \
+  sts.googleapis.com \
+  aiplatform.googleapis.com \
+  --project "$PROJECT_ID"
+```
+
+Create the deployment and runtime service accounts:
+
+```bash
+gcloud iam service-accounts create "$DEPLOY_SA_ID" \
+  --project "$PROJECT_ID" \
+  --display-name "Support Copilot GitHub CD deployer"
+
+gcloud iam service-accounts create "$RUNTIME_SA_ID" \
+  --project "$PROJECT_ID" \
+  --display-name "Support Copilot Cloud Run runtime"
+```
+
+Create the Workload Identity Pool and GitHub OIDC provider:
+
+```bash
+gcloud iam workload-identity-pools create "$POOL_ID" \
+  --project "$PROJECT_ID" \
+  --location "global" \
+  --display-name "GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
+  --project "$PROJECT_ID" \
+  --location "global" \
+  --workload-identity-pool "$POOL_ID" \
+  --display-name "GitHub Actions provider" \
+  --issuer-uri "https://token.actions.githubusercontent.com" \
+  --attribute-mapping "google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref" \
+  --attribute-condition "assertion.repository=='${REPO}'"
+```
+
+Allow only this repository to impersonate the deployment service account:
+
+```bash
+export PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/${REPO}"
+
+gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA_EMAIL" \
+  --project "$PROJECT_ID" \
+  --role "roles/iam.workloadIdentityUser" \
+  --member "$PRINCIPAL_SET"
+```
+
+Grant deployment permissions:
+
+```bash
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOY_SA_EMAIL}" \
+  --role "roles/run.admin"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOY_SA_EMAIL}" \
+  --role "roles/cloudbuild.builds.editor"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOY_SA_EMAIL}" \
+  --role "roles/artifactregistry.writer"
+
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL" \
+  --project "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOY_SA_EMAIL}" \
+  --role "roles/iam.serviceAccountUser"
+```
+
+Grant runtime permissions for Gemini and managed RAG retrieval:
+
+```bash
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role "roles/aiplatform.user"
+```
+
+If your organization requires the Cloud Build service account to perform
+additional source-deployment actions, grant only the minimum permissions needed
+for your project policy. Common source deployment requirements include
+permission to write build artifacts and to act as the Cloud Run runtime service
+account:
+
+```bash
+export CLOUDBUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${CLOUDBUILD_SA}" \
+  --role "roles/artifactregistry.writer"
+
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL" \
+  --project "$PROJECT_ID" \
+  --member "serviceAccount:${CLOUDBUILD_SA}" \
+  --role "roles/iam.serviceAccountUser"
+```
+
+Set these GitHub repository variables after the provider is created:
+
+```text
+GCP_PROJECT_ID=your-project-id
+GCP_REGION=us-central1
+WORKLOAD_IDENTITY_PROVIDER=projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github
+DEPLOY_SERVICE_ACCOUNT=support-copilot-deployer@your-project-id.iam.gserviceaccount.com
+CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=support-copilot-runtime@your-project-id.iam.gserviceaccount.com
+CLOUD_RUN_SERVICE=enterprise-ai-support-copilot
+TICKET_ANALYSIS_PROVIDER=gemini
+KNOWLEDGE_PROVIDER=vertex_rag
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_CLOUD_LOCATION=us-central1
+GEMINI_MODEL=gemini-2.5-flash
+RAG_CORPUS_RESOURCE_NAME=projects/your-project-id/locations/us-central1/ragCorpora/YOUR_CORPUS_ID
+RAG_LOCATION=us-central1
+```
+
 ## Testing
 
 Run the local quality gate:
@@ -487,8 +699,8 @@ Managed Google Cloud calls are mocked in automated tests.
 ## Roadmap
 
 - BigQuery conversation analytics
-- Evaluation framework for ticket analysis quality
-- CI/CD pipeline
+- Evaluation framework enhancements
+- Progressive deployment approvals and rollback strategy
 - Terraform infrastructure modules
 - Knowledge ingestion pipeline
 - Hybrid retrieval

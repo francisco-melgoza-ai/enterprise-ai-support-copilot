@@ -1,0 +1,144 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-cloud-run
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      TICKET_ANALYSIS_PROVIDER: ${{ vars.TICKET_ANALYSIS_PROVIDER }}
+      KNOWLEDGE_PROVIDER: ${{ vars.KNOWLEDGE_PROVIDER }}
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+      RAG_CORPUS_RESOURCE_NAME: ${{ vars.RAG_CORPUS_RESOURCE_NAME }}
+      RAG_LOCATION: ${{ vars.RAG_LOCATION }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        id: config
+        shell: bash
+        run: |
+          required_vars=(
+            GCP_PROJECT_ID
+            GCP_REGION
+            WORKLOAD_IDENTITY_PROVIDER
+            DEPLOY_SERVICE_ACCOUNT
+            CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT
+            CLOUD_RUN_SERVICE
+            TICKET_ANALYSIS_PROVIDER
+            KNOWLEDGE_PROVIDER
+            GOOGLE_CLOUD_PROJECT
+            GOOGLE_CLOUD_LOCATION
+            GEMINI_MODEL
+            RAG_CORPUS_RESOURCE_NAME
+            RAG_LOCATION
+          )
+
+          missing=()
+          for name in "${required_vars[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("${name}")
+            fi
+          done
+
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            printf 'Missing required repository variables:\n'
+            printf ' - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          if [[ "${CLOUD_RUN_SERVICE}" != "enterprise-ai-support-copilot" ]]; then
+            printf 'CLOUD_RUN_SERVICE must be enterprise-ai-support-copilot.\n'
+            exit 1
+          fi
+
+          env_vars="TICKET_ANALYSIS_PROVIDER=${TICKET_ANALYSIS_PROVIDER},KNOWLEDGE_PROVIDER=${KNOWLEDGE_PROVIDER},GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},GEMINI_MODEL=${GEMINI_MODEL},RAG_CORPUS_RESOURCE_NAME=${RAG_CORPUS_RESOURCE_NAME},RAG_LOCATION=${RAG_LOCATION}"
+          echo "env_vars=${env_vars}" >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy source to Cloud Run
+        shell: bash
+        run: |
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" \
+            --source . \
+            --platform managed \
+            --region "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}" \
+            --service-account "${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}" \
+            --memory "1Gi" \
+            --allow-unauthenticated \
+            --update-env-vars "${{ steps.config.outputs.env_vars }}" \
+            --quiet
+
+      - name: Capture Cloud Run URL
+        id: service
+        shell: bash
+        run: |
+          service_url="$(gcloud run services describe "${CLOUD_RUN_SERVICE}" \
+            --platform managed \
+            --region "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}" \
+            --format 'value(status.url)')"
+
+          if [[ -z "${service_url}" ]]; then
+            printf 'Cloud Run service URL was not available after deployment.\n'
+            exit 1
+          fi
+
+          echo "url=${service_url}" >> "${GITHUB_OUTPUT}"
+          printf 'Deployed Cloud Run URL: %s\n' "${service_url}"
+
+      - name: Verify health endpoint
+        shell: bash
+        run: |
+          health_url="${{ steps.service.outputs.url }}/health"
+          max_attempts=12
+
+          for attempt in $(seq 1 "${max_attempts}"); do
+            status_code="$(curl --silent --show-error --output /tmp/health-response.txt --write-out '%{http_code}' "${health_url}" || true)"
+            if [[ "${status_code}" == "200" ]]; then
+              printf 'Health check succeeded with HTTP 200 on attempt %s.\n' "${attempt}"
+              exit 0
+            fi
+
+            printf 'Health check attempt %s/%s returned HTTP %s.\n' "${attempt}" "${max_attempts}" "${status_code}"
+            sleep 10
+          done
+
+          printf 'Health verification failed for %s after %s attempts.\n' "${health_url}" "${max_attempts}"
+          printf 'Last health response body:\n'
+          head -c 1000 /tmp/health-response.txt || true
+          printf '\n'
+          exit 1
