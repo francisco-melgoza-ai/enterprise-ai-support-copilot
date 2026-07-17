@@ -85,6 +85,105 @@ curl http://localhost:8000/ready
 curl http://localhost:8000/metrics
 ```
 
+## Distributed Tracing
+
+OpenTelemetry tracing is available for following one ticket-analysis request
+across HTTP handling, FastAPI routing, knowledge retrieval, Gemini generation,
+and response serialization.
+
+Tracing is disabled by default so local development, CI, and tests do not
+export spans unless explicitly configured.
+
+### Environment Variables
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `OTEL_TRACING_ENABLED` | Enables tracing when set to `true`, `1`, `yes`, or `on`. | disabled |
+| `OTEL_SERVICE_NAME` | Service name attached to traces. | `enterprise-ai-support-copilot` |
+| `OTEL_EXPORTER` | Exporter mode: `none`, `console`, or `otlp`. | `none` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP traces endpoint, such as `http://collector:4318/v1/traces`. | SDK default |
+
+Local console tracing:
+
+```bash
+export OTEL_TRACING_ENABLED=true
+export OTEL_EXPORTER=console
+uvicorn app.main:app --reload
+```
+
+OTLP tracing:
+
+```bash
+export OTEL_TRACING_ENABLED=true
+export OTEL_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318/v1/traces"
+uvicorn app.main:app --reload
+```
+
+### Production Recommendation
+
+For Cloud Run, prefer exporting OTLP traces to a managed or self-hosted
+OpenTelemetry Collector, then route traces to Cloud Trace or another approved
+backend. This keeps the application vendor-neutral and avoids service account
+JSON keys.
+
+Add the following Cloud Run environment variables when production tracing is
+ready:
+
+```text
+OTEL_TRACING_ENABLED=true
+OTEL_SERVICE_NAME=enterprise-ai-support-copilot
+OTEL_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_ENDPOINT=https://YOUR_COLLECTOR_ENDPOINT/v1/traces
+```
+
+The current CD workflow does not set these variables. Add them only after an
+OTLP collector or approved tracing backend is available.
+
+### Sampling Guidance
+
+This application does not implement advanced tail sampling yet.
+
+Initial guidance:
+
+- Capture 100% of errors where the backend or collector supports it.
+- Sample a low percentage of successful production traffic to control cost and
+  noise.
+- Temporarily increase successful-traffic sampling during incident
+  investigation.
+- Keep local tracing disabled unless actively debugging.
+
+### Safe-Data Policy
+
+Never attach these values to spans:
+
+- ticket text
+- ticket subject or description
+- prompt contents
+- generated response content
+- retrieved document contents
+- credentials
+- raw ticket IDs
+- PII
+
+Allowed span attributes are low-cardinality operational values such as
+provider, model, outcome, retry attempt count, category, priority, escalation
+flag, and retrieved chunk count.
+
+### Troubleshooting
+
+- No spans locally: confirm `OTEL_TRACING_ENABLED=true` and
+  `OTEL_EXPORTER=console` or `OTEL_EXPORTER=otlp`.
+- No OTLP export: verify `OTEL_EXPORTER_OTLP_ENDPOINT` includes the traces path,
+  commonly `/v1/traces` for OTLP HTTP.
+- Missing log correlation: confirm tracing is enabled and the log was emitted
+  while a real span was active. Logs outside spans continue to omit `trace_id`
+  and `span_id`.
+- Duplicate spans in development: restart the reload process after changing
+  tracing configuration.
+- Sensitive data concern: inspect span attributes and events; only operational
+  metadata should be present.
+
 ## Google Cloud Monitoring Setup
 
 The following commands are one-time setup examples. Review them for your
