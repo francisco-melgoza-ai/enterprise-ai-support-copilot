@@ -8,6 +8,8 @@ from uuid import uuid4
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from app.core.metrics import record_http_request
+
 REQUEST_ID_HEADER = "X-Request-ID"
 request_id_context: ContextVar[str | None] = ContextVar(
     "request_id_context", default=None
@@ -80,8 +82,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
         finally:
-            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            duration_seconds = time.perf_counter() - started_at
+            duration_ms = round(duration_seconds * 1000, 2)
             status_code = response.status_code if response is not None else 500
+            record_http_request(
+                endpoint=_route_template(request),
+                method=request.method,
+                status_code=status_code,
+                duration_seconds=duration_seconds,
+            )
             logging.getLogger("app.request").info(
                 "request_completed",
                 extra={
@@ -92,3 +101,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 },
             )
             request_id_context.reset(token)
+
+
+def _route_template(request: Request) -> str:
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    if isinstance(path, str):
+        return path
+    return "unmatched"

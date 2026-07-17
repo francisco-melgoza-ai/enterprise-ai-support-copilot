@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.core.metrics import record_retrieval_request
 from app.schemas.retrieval import RetrievedPassage
 from app.schemas.tickets import TicketAnalysisRequest
 
@@ -154,12 +155,19 @@ class LocalKnowledgeRetriever:
             outcome = "error"
             raise
         finally:
+            duration_seconds = time.perf_counter() - started_at
+            record_retrieval_request(
+                provider="local",
+                outcome=outcome,
+                retrieved_chunk_count=len(passages),
+                duration_seconds=duration_seconds,
+            )
             logger.info(
                 "knowledge_retrieval_completed",
                 extra={
                     "provider": "local",
                     "retrieved_chunk_count": len(passages),
-                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "duration_ms": round(duration_seconds * 1000, 2),
                     "outcome": outcome,
                 },
             )
@@ -319,12 +327,19 @@ class VertexRagKnowledgeRetriever:
             outcome = "error"
             raise KnowledgeRetrievalError("Vertex RAG retrieval failed.") from exc
         finally:
+            duration_seconds = time.perf_counter() - started_at
+            record_retrieval_request(
+                provider=DEFAULT_VERTEX_RAG_PROVIDER,
+                outcome=outcome,
+                retrieved_chunk_count=len(passages),
+                duration_seconds=duration_seconds,
+            )
             logger.info(
                 "knowledge_retrieval_completed",
                 extra={
                     "provider": DEFAULT_VERTEX_RAG_PROVIDER,
                     "retrieved_chunk_count": len(passages),
-                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "duration_ms": round(duration_seconds * 1000, 2),
                     "outcome": outcome,
                 },
             )

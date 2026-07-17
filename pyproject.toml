@@ -8,6 +8,7 @@ dependencies = [
     "google-cloud-aiplatform",
     "google-genai",
     "pandas",
+    "prometheus-client",
     "python-dotenv",
     "uvicorn[standard]",
 ]

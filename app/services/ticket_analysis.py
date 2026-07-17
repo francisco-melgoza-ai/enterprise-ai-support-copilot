@@ -8,6 +8,7 @@ from google import genai
 from google.genai import types
 from pydantic import ValidationError
 
+from app.core.metrics import record_provider_request
 from app.schemas.tickets import (
     TicketAnalysisRequest,
     TicketAnalysisResponse,
@@ -218,7 +219,14 @@ class GeminiTicketAnalysisService:
             attempt_count = max(attempt_count, self._max_attempts)
             raise
         finally:
-            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            duration_seconds = time.perf_counter() - started_at
+            duration_ms = round(duration_seconds * 1000, 2)
+            record_provider_request(
+                provider="gemini",
+                model=self._model,
+                outcome=outcome,
+                duration_seconds=duration_seconds,
+            )
             logger.info(
                 "gemini_ticket_analysis_completed",
                 extra={

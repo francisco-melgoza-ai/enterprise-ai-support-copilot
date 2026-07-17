@@ -31,6 +31,8 @@ runtime service account for Google Cloud access.
 FastAPI exposes:
 
 - `GET /health`
+- `GET /ready`
+- `GET /metrics`
 - `POST /api/v1/tickets/analyze`
 
 Routes handle HTTP concerns, request validation, response serialization, and
@@ -242,6 +244,20 @@ the endpoint returns HTTP `200`.
 
 The application uses structured JSON logging and request correlation.
 
+```text
+Client
+↓
+Cloud Run
+↓
+FastAPI middleware and service instrumentation
+↓
+Structured logs + Prometheus metrics
+↓
+Cloud Logging / Cloud Monitoring
+↓
+Dashboards, SLOs, and alerts
+```
+
 ### X-Request-ID
 
 - Incoming `X-Request-ID` is preserved when present.
@@ -285,6 +301,39 @@ Outcomes include `success`, `timeout`, `invalid_response`, and `error`.
 Cloud Run captures application logs in Cloud Logging. A single request can be
 traced across request lifecycle, retrieval telemetry, and Gemini telemetry by
 filtering on `request_id`.
+
+### Prometheus Metrics
+
+The application exposes Prometheus-compatible metrics at `/metrics` with the
+`support_copilot_` prefix. Metrics include HTTP request counts and duration,
+ticket-analysis request/success/failure counts, Gemini provider request counts,
+provider failures, provider duration, retrieval counts, retrieval failures,
+retrieval duration, retrieved chunk counts, and escalation counts.
+
+Metric labels are intentionally low-cardinality:
+
+- HTTP metrics: endpoint route template, method, status code.
+- Provider metrics: provider, model, outcome.
+- Retrieval metrics: provider, outcome.
+
+Metrics do not use request IDs, ticket IDs, ticket content, prompts, retrieved
+document content, generated responses, credentials, or PII as labels or values.
+
+Cloud Run does not automatically ingest arbitrary application `/metrics`
+endpoints into Cloud Monitoring. Built-in Cloud Run metrics and structured logs
+are immediately available. Application Prometheus metrics require an explicit
+collection path such as Managed Service for Prometheus, a scraper, or a future
+OpenTelemetry Collector.
+
+### Health And Readiness
+
+- `/health` is the liveness endpoint for Cloud Run health verification and
+  external uptime checks.
+- `/ready` is a lightweight readiness endpoint that validates configured
+  provider names. It does not call Gemini, Vertex AI, or Vertex AI RAG Engine.
+
+Operational SLOs, SLIs, alert policy examples, and dashboard recommendations
+are documented in [operations.md](operations.md).
 
 ## Security
 
