@@ -294,6 +294,53 @@ Metrics use the `support_copilot_` prefix and avoid high-cardinality or
 sensitive labels. They do not include request IDs, ticket IDs, ticket text,
 prompts, retrieved document content, generated responses, credentials, or PII.
 
+### Distributed Tracing
+
+OpenTelemetry tracing is available but disabled by default for local
+development and tests. When enabled, a ticket-analysis request can be followed
+across the HTTP request, FastAPI endpoint, knowledge retrieval, Gemini provider
+call, and API response.
+
+Tracing environment variables:
+
+- `OTEL_TRACING_ENABLED`: set to `true` to enable tracing; defaults to disabled.
+- `OTEL_SERVICE_NAME`: optional, defaults to `enterprise-ai-support-copilot`.
+- `OTEL_EXPORTER`: `none`, `console`, or `otlp`; defaults to `none`.
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: required when exporting to an OTLP collector
+  unless the collector uses the SDK default endpoint.
+
+Console exporter example:
+
+```bash
+export OTEL_TRACING_ENABLED=true
+export OTEL_EXPORTER=console
+uvicorn app.main:app --reload
+```
+
+OTLP exporter example:
+
+```bash
+export OTEL_TRACING_ENABLED=true
+export OTEL_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
+uvicorn app.main:app --reload
+```
+
+Trace, log, and request-ID correlation:
+
+- `X-Request-ID` remains the primary support correlation identifier.
+- When tracing is enabled and a real span is active, structured logs include
+  `trace_id` and `span_id`.
+- The active HTTP span receives `http.request_id` as a safe attribute.
+
+Tracing safe-data policy:
+
+- Do not add ticket text, subjects, descriptions, prompts, generated responses,
+  retrieved document content, credentials, raw ticket IDs, or PII to spans.
+- Span attributes are limited to low-cardinality operational fields such as
+  provider, model, outcome, retry count, category, priority, escalation flag,
+  and retrieved chunk count.
+
 Initial portfolio/demo SLOs:
 
 - Availability: `99.5%` successful requests over 30 days.

@@ -253,6 +253,8 @@ FastAPI middleware and service instrumentation
 ↓
 Structured logs + Prometheus metrics
 ↓
+OpenTelemetry traces
+↓
 Cloud Logging / Cloud Monitoring
 ↓
 Dashboards, SLOs, and alerts
@@ -334,6 +336,41 @@ OpenTelemetry Collector.
 
 Operational SLOs, SLIs, alert policy examples, and dashboard recommendations
 are documented in [operations.md](operations.md).
+
+### Distributed Tracing
+
+```text
+Client
+↓
+Cloud Run
+↓
+FastAPI instrumentation
+↓
+ticket.analysis span
+├── knowledge.retrieve span
+└── provider.generate span
+↓
+OpenTelemetry exporter
+↓
+Cloud Trace or OTLP backend
+```
+
+OpenTelemetry tracing is environment-controlled and disabled by default. When
+enabled, FastAPI instrumentation creates HTTP request spans and the application
+adds custom spans for ticket analysis, retrieval, and Gemini generation.
+
+Custom spans use safe, low-cardinality attributes:
+
+- `ticket.analysis`: category, priority, escalation flag.
+- `knowledge.retrieve`: provider, outcome, retrieved chunk count.
+- `provider.generate`: provider, model, outcome, retry attempt count.
+
+The active HTTP span receives `http.request_id` for request correlation.
+Structured logs include `trace_id` and `span_id` when a real span is active,
+while preserving the existing `request_id` field.
+
+Tracing does not attach ticket text, subject, description, raw ticket ID,
+prompts, generated content, retrieved document content, credentials, or PII.
 
 ## Security
 

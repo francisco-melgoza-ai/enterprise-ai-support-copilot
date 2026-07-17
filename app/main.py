@@ -9,6 +9,7 @@ from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.router import api_router
 from app.core.logging import RequestLoggingMiddleware, configure_logging
 from app.core.settings import TicketAnalysisSettings
+from app.core.tracing import configure_tracing
 
 configure_logging()
 
@@ -37,3 +38,4 @@ app.add_middleware(RequestLoggingMiddleware)
 register_exception_handlers(app)
 app.include_router(health_router)
 app.include_router(api_router, prefix="/api/v1")
+configure_tracing(app)

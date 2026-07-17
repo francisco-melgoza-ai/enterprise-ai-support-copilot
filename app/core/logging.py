@@ -6,9 +6,11 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Request, Response
+from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from app.core.metrics import record_http_request
+from app.core.tracing import get_trace_log_fields, record_span_exception
 
 REQUEST_ID_HEADER = "X-Request-ID"
 request_id_context: ContextVar[str | None] = ContextVar(
@@ -31,6 +33,12 @@ class JsonFormatter(logging.Formatter):
         request_id = getattr(record, "request_id", None) or get_request_id()
         if request_id is not None:
             payload["request_id"] = request_id
+        trace_id = getattr(record, "trace_id", None)
+        span_id = getattr(record, "span_id", None)
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+        if span_id is not None:
+            payload["span_id"] = span_id
 
         for key in (
             "method",
@@ -55,6 +63,9 @@ def configure_logging() -> None:
     def record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
         record = _default_log_record_factory(*args, **kwargs)
         record.request_id = get_request_id()
+        trace_fields = get_trace_log_fields()
+        record.trace_id = trace_fields.get("trace_id")
+        record.span_id = trace_fields.get("span_id")
         return record
 
     logging.setLogRecordFactory(record_factory)
@@ -78,9 +89,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         response: Response | None = None
 
         try:
+            current_span = trace.get_current_span()
+            if current_span.is_recording():
+                current_span.set_attribute("http.request_id", request_id)
             response = await call_next(request)
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
+        except Exception as exc:
+            record_span_exception(trace.get_current_span(), exc)
+            raise
         finally:
             duration_seconds = time.perf_counter() - started_at
             duration_ms = round(duration_seconds * 1000, 2)

@@ -9,6 +9,7 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.core.metrics import record_provider_request
+from app.core.tracing import get_tracer, record_span_exception, set_span_attributes
 from app.schemas.tickets import (
     TicketAnalysisRequest,
     TicketAnalysisResponse,
@@ -22,6 +23,7 @@ from app.services.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
 
 
 class TicketAnalysisServiceError(Exception):
@@ -206,18 +208,41 @@ class GeminiTicketAnalysisService:
         outcome = "error"
 
         try:
-            response, attempt_count = await self._generate_with_retries(ticket)
-            result = self._parse_response(response)
-            outcome = "success"
-            return result
-        except TicketAnalysisModelResponseError:
-            outcome = "invalid_response"
-            attempt_count = max(attempt_count, 1)
-            raise
-        except TicketAnalysisProviderError as exc:
-            outcome = "timeout" if exc.is_timeout else "error"
-            attempt_count = max(attempt_count, self._max_attempts)
-            raise
+            prompt, config = await self._build_generation_request(ticket)
+            with tracer.start_as_current_span("provider.generate") as span:
+                set_span_attributes(
+                    span,
+                    {
+                        "ai.provider": "gemini",
+                        "ai.model": self._model,
+                    },
+                )
+                try:
+                    response, attempt_count = await self._generate_with_retries(
+                        prompt,
+                        config,
+                    )
+                    result = self._parse_response(response)
+                    outcome = "success"
+                    return result
+                except TicketAnalysisModelResponseError as exc:
+                    outcome = "invalid_response"
+                    attempt_count = max(attempt_count, 1)
+                    record_span_exception(span, exc)
+                    raise
+                except TicketAnalysisProviderError as exc:
+                    outcome = "timeout" if exc.is_timeout else "error"
+                    attempt_count = max(attempt_count, self._max_attempts)
+                    record_span_exception(span, exc)
+                    raise
+                finally:
+                    set_span_attributes(
+                        span,
+                        {
+                            "ai.outcome": outcome,
+                            "retry.attempt_count": attempt_count,
+                        },
+                    )
         finally:
             duration_seconds = time.perf_counter() - started_at
             duration_ms = round(duration_seconds * 1000, 2)
@@ -238,9 +263,9 @@ class GeminiTicketAnalysisService:
                 },
             )
 
-    async def _generate_with_retries(
+    async def _build_generation_request(
         self, ticket: TicketAnalysisRequest
-    ) -> tuple[Any, int]:
+    ) -> tuple[str, types.GenerateContentConfig]:
         retrieved_passages = None
         if self._knowledge_retriever is not None:
             retrieved_passages = await self._knowledge_retriever.retrieve(ticket)
@@ -252,7 +277,13 @@ class GeminiTicketAnalysisService:
             temperature=0,
             max_output_tokens=1024,
         )
+        return prompt, config
 
+    async def _generate_with_retries(
+        self,
+        prompt: str,
+        config: types.GenerateContentConfig,
+    ) -> tuple[Any, int]:
         last_error: Exception | None = None
         timed_out = False
         for attempt in range(1, self._max_attempts + 1):
